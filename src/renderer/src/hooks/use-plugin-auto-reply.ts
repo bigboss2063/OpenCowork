@@ -14,13 +14,17 @@ import { useEffect } from 'react'
 import { nanoid } from 'nanoid'
 import { runAgentLoop } from '@renderer/lib/agent/agent-loop'
 import { toolRegistry } from '@renderer/lib/agent/tool-registry'
-import { buildSystemPrompt } from '@renderer/lib/agent/system-prompt'
+import {
+  buildSystemPrompt,
+  resolvePromptEnvironmentContext
+} from '@renderer/lib/agent/system-prompt'
 import { useSettingsStore } from '@renderer/stores/settings-store'
 import { useProviderStore, modelSupportsVision } from '@renderer/stores/provider-store'
 import { ensureProviderAuthReady } from '@renderer/lib/auth/provider-auth'
 import { useChannelStore } from '@renderer/stores/channel-store'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
+import { useSshStore } from '@renderer/stores/ssh-store'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
 import { registerPluginTools, isPluginToolsRegistered } from '@renderer/lib/channel/plugin-tools'
@@ -33,9 +37,7 @@ import {
 import type { UnifiedMessage, ProviderConfig } from '@renderer/lib/api/types'
 import type { AgentLoopConfig } from '@renderer/lib/agent/types'
 import type { ToolContext } from '@renderer/lib/tools/tool-types'
-import {
-  hasPendingSessionMessagesForSession,
-} from '@renderer/hooks/use-chat-actions'
+import { hasPendingSessionMessagesForSession } from '@renderer/hooks/use-chat-actions'
 
 interface PluginAutoReplyTask {
   sessionId: string
@@ -59,19 +61,23 @@ interface PluginAutoReplyTask {
 
 const PLUGIN_STREAM_DELTA_FLUSH_MS = 66
 
-
 async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const { sessionId, pluginId, pluginType, chatId, supportsStreaming } = task
 
   // ── Check feature toggles ──
   const channelMeta = useChannelStore.getState().channels.find((p) => p.id === pluginId)
-  const features = channelMeta?.features ?? { autoReply: true, streamingReply: true, autoStart: true }
+  const features = channelMeta?.features ?? {
+    autoReply: true,
+    streamingReply: true,
+    autoStart: true
+  }
   const channelTypeFromStore = (channelMeta?.type ?? '').toLowerCase()
   const pluginTypeFromTask = (pluginType ?? '').toLowerCase()
-  const isFeishuChannel = channelTypeFromStore === 'feishu-bot'
-    || pluginTypeFromTask === 'feishu-bot'
-    || channelTypeFromStore === 'feishu'
-    || pluginTypeFromTask === 'feishu'
+  const isFeishuChannel =
+    channelTypeFromStore === 'feishu-bot' ||
+    pluginTypeFromTask === 'feishu-bot' ||
+    channelTypeFromStore === 'feishu' ||
+    pluginTypeFromTask === 'feishu'
   if (!features.autoReply) {
     console.log(`[PluginAutoReply] Auto-reply disabled for plugin ${pluginId}, skipping`)
     return
@@ -82,7 +88,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       await ipcClient.invoke(IPC.PLUGIN_EXEC, {
         pluginId,
         action: 'sendMessage',
-        params: { chatId, content: message },
+        params: { chatId, content: message }
       })
     } catch (err) {
       console.error('[PluginAutoReply] Failed to send notice:', err)
@@ -119,7 +125,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     const speechProviderId = providerStore.activeSpeechProviderId
     const speechModelId = providerStore.activeSpeechModelId
     if (!speechProviderId || !speechModelId) {
-      await sendChannelNotice('已收到语音消息，但未配置语音识别模型。请在 设置 → 模型 → 语音识别模型 中选择后再试。')
+      await sendChannelNotice(
+        '已收到语音消息，但未配置语音识别模型。请在 设置 → 模型 → 语音识别模型 中选择后再试。'
+      )
       return
     }
 
@@ -131,17 +139,19 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
 
     const openAiConfig = resolveOpenAiProviderConfig(speechProviderId, speechModelId)
     if (!openAiConfig) {
-      await sendChannelNotice('语音识别需要 OpenAI 兼容服务商。请在 设置 → 模型 → 语音识别模型 中选择 OpenAI 兼容模型后再试。')
+      await sendChannelNotice(
+        '语音识别需要 OpenAI 兼容服务商。请在 设置 → 模型 → 语音识别模型 中选择 OpenAI 兼容模型后再试。'
+      )
       return
     }
 
     try {
-      const download = await ipcClient.invoke(IPC.PLUGIN_FEISHU_DOWNLOAD_RESOURCE, {
+      const download = (await ipcClient.invoke(IPC.PLUGIN_FEISHU_DOWNLOAD_RESOURCE, {
         pluginId,
         messageId: task.messageId,
         fileKey: task.audio.fileKey,
-        type: 'file',
-      }) as { ok?: boolean; base64?: string; mediaType?: string; error?: string }
+        type: 'file'
+      })) as { ok?: boolean; base64?: string; mediaType?: string; error?: string }
 
       if (!download?.base64 || download.error) {
         await sendChannelNotice(`语音下载失败：${download?.error ?? 'unknown error'}`)
@@ -149,9 +159,10 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       }
 
       const reportedMediaType = (download.mediaType ?? '').trim().toLowerCase()
-      const effectiveMediaType = (reportedMediaType && reportedMediaType !== 'application/octet-stream'
-        ? reportedMediaType
-        : task.audio.mediaType) ?? 'application/octet-stream'
+      const effectiveMediaType =
+        (reportedMediaType && reportedMediaType !== 'application/octet-stream'
+          ? reportedMediaType
+          : task.audio.mediaType) ?? 'application/octet-stream'
 
       const transcript = await transcribeFeishuAudio({
         base64: download.base64,
@@ -159,12 +170,10 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
         fileName: task.audio.fileName ?? 'audio',
         model: openAiConfig.config.model,
         apiKey: openAiConfig.config.apiKey,
-        baseUrl: openAiConfig.config.baseUrl,
+        baseUrl: openAiConfig.config.baseUrl
       })
 
-      effectiveContent = transcript.trim()
-        ? transcript
-        : '[语音已转写，但内容为空]'
+      effectiveContent = transcript.trim() ? transcript : '[语音已转写，但内容为空]'
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       await sendChannelNotice(`语音转写失败：${msg}`)
@@ -175,7 +184,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       pluginId,
       messageId: task.messageId,
       pluginTypeFromTask: pluginType,
-      pluginTypeFromStore: channelMeta?.type,
+      pluginTypeFromStore: channelMeta?.type
     })
   }
 
@@ -184,7 +193,10 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   if (supportsStreaming && features.streamingReply) {
     try {
       const res = (await ipcClient.invoke('plugin:stream:start', {
-        pluginId, chatId, initialContent: ' Thinking...', messageId: task.messageId,
+        pluginId,
+        chatId,
+        initialContent: ' Thinking...',
+        messageId: task.messageId
       })) as { ok: boolean }
       streamingActive = !!res?.ok
     } catch (err) {
@@ -214,9 +226,11 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
 
   if (channelProjectId) {
     try {
-      const existingProject = useChatStore.getState().projects.find((project) => project.id === channelProjectId)
+      const existingProject = useChatStore
+        .getState()
+        .projects.find((project) => project.id === channelProjectId)
       if (!existingProject) {
-        const row = await ipcClient.invoke('db:projects:get', channelProjectId) as {
+        const row = (await ipcClient.invoke('db:projects:get', channelProjectId)) as {
           id: string
           name: string
           created_at: number
@@ -236,7 +250,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
                 updatedAt: row.updated_at,
                 workingFolder: row.working_folder ?? undefined,
                 sshConnectionId: row.ssh_connection_id ?? undefined,
-                pluginId: row.plugin_id ?? undefined,
+                pluginId: row.plugin_id ?? undefined
               })
             }
           })
@@ -280,7 +294,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
           pluginId,
           externalChatId: `plugin:${pluginId}:chat:${task.chatId}`,
           providerId: dbSession.provider_id || channelMeta?.providerId || undefined,
-          modelId: dbSession.model_id || channelMeta?.model || undefined,
+          modelId: dbSession.model_id || channelMeta?.model || undefined
         }
         useChatStore.setState((state) => {
           state.sessions.push(newSession)
@@ -308,7 +322,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       pluginId,
       externalChatId: `plugin:${pluginId}:chat:${task.chatId}`,
       providerId: channelMeta?.providerId || undefined,
-      modelId: channelMeta?.model || undefined,
+      modelId: channelMeta?.model || undefined
     }
     useChatStore.setState((state) => {
       state.sessions.push(newSession)
@@ -341,12 +355,12 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       pluginSenderName: task.senderName,
       projectId: channelProjectId ?? session.projectId,
       workingFolder: channelWorkDir || session.workingFolder,
-      sshConnectionId: channelSshConnectionId ?? session.sshConnectionId,
+      sshConnectionId: channelSshConnectionId ?? session.sshConnectionId
     }
   }
 
   // Update session title in store if we have a better name now
-  if (session && /^oc_/.test(session.title) && resolvedTitle && !(/^oc_/.test(resolvedTitle))) {
+  if (session && /^oc_/.test(session.title) && resolvedTitle && !/^oc_/.test(resolvedTitle)) {
     useChatStore.setState((state) => {
       const s = state.sessions.find((s) => s.id === sessionId)
       if (s) s.title = resolvedTitle
@@ -394,7 +408,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   // (channelMeta already resolved above from useChannelStore)
   const isFeishu = isFeishuChannel
 
-  const channelDescriptor = channelMeta ? useChannelStore.getState().getDescriptor(channelMeta.type) : undefined
+  const channelDescriptor = channelMeta
+    ? useChannelStore.getState().getDescriptor(channelMeta.type)
+    : undefined
   const channelToolNames = channelDescriptor?.tools ?? []
   const enabledTools = channelToolNames.filter((name) => channelMeta?.tools?.[name] !== false)
   const disabledTools = channelToolNames.filter((name) => channelMeta?.tools?.[name] === false)
@@ -426,16 +442,22 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     `4. **Format guidelines**: Prefer Markdown (.md) for reports and documentation, CSV for tabular data, HTML for rich formatted reports, JSON for structured data. Use the format that best serves the user's needs.`,
     `5. **Do NOT paste entire file contents as chat messages** when the content is long (>30 lines). Write it to a file and send the file instead — this provides a much better user experience.`,
 
-    isFeishu ? [
-      `\n### Feishu Media Tools`,
-      `You can send images and files to this chat:`,
-      `- **FeishuSendImage**: Send an image (local path or URL). plugin_id="${pluginId}", chat_id="${chatId}"`,
-      `- **FeishuSendFile**: Send a file (pdf, doc, xls, ppt, mp4, etc.). plugin_id="${pluginId}", chat_id="${chatId}"`,
-      `For @mentions, fetch member open_id via **FeishuListChatMembers** and call **FeishuAtMember** (plain '@' text will not mention).`,
-      `Always prefer sending files over pasting long content in messages.`,
-    ].join('\n') : '',
-    channelMeta?.userSystemPrompt?.trim() ? `\nChannel-specific instructions: ${channelMeta.userSystemPrompt.trim()}` : '',
-  ].filter(Boolean).join('\n')
+    isFeishu
+      ? [
+          `\n### Feishu Media Tools`,
+          `You can send images and files to this chat:`,
+          `- **FeishuSendImage**: Send an image (local path or URL). plugin_id="${pluginId}", chat_id="${chatId}"`,
+          `- **FeishuSendFile**: Send a file (pdf, doc, xls, ppt, mp4, etc.). plugin_id="${pluginId}", chat_id="${chatId}"`,
+          `For @mentions, fetch member open_id via **FeishuListChatMembers** and call **FeishuAtMember** (plain '@' text will not mention).`,
+          `Always prefer sending files over pasting long content in messages.`
+        ].join('\n')
+      : '',
+    channelMeta?.userSystemPrompt?.trim()
+      ? `\nChannel-specific instructions: ${channelMeta.userSystemPrompt.trim()}`
+      : ''
+  ]
+    .filter(Boolean)
+    .join('\n')
   userPrompt = userPrompt ? `${userPrompt}\n${channelCtx}` : channelCtx
 
   // Load AGENTS.md memory file from working directory
@@ -448,6 +470,16 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const globalMemorySnapshot = await loadGlobalMemorySnapshot(ipcClient)
   const globalMemory = globalMemorySnapshot.content
   const globalMemoryPath = globalMemorySnapshot.path
+  const sshConnection = session.sshConnectionId
+    ? useSshStore
+        .getState()
+        .connections.find((connection) => connection.id === session.sshConnectionId)
+    : undefined
+  const environmentContext = resolvePromptEnvironmentContext({
+    sshConnectionId: session.sshConnectionId,
+    workingFolder: session.workingFolder,
+    sshConnection
+  })
 
   const systemPrompt = buildSystemPrompt({
     mode: 'cowork',
@@ -457,7 +489,8 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     language: settings.language,
     agentsMemory,
     globalMemory,
-    globalMemoryPath
+    globalMemoryPath,
+    environmentContext
   })
 
   // ── Build user message ──
@@ -468,7 +501,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       for (const img of task.images) {
         blocks.push({
           type: 'image',
-          source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
+          source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
         })
       }
       if (effectiveContent) {
@@ -485,7 +518,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     id: nanoid(),
     role: 'user',
     content: userContent as string,
-    createdAt: Date.now(),
+    createdAt: Date.now()
   }
 
   // Add user message to store + DB
@@ -497,7 +530,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     id: assistantMsgId,
     role: 'assistant',
     content: '',
-    createdAt: Date.now(),
+    createdAt: Date.now()
   }
   useChatStore.getState().addMessage(sessionId, assistantMsg)
   useChatStore.getState().setStreamingMessageId(sessionId, assistantMsgId)
@@ -508,7 +541,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const agentProviderConfig: ProviderConfig = {
     ...providerConfig,
     systemPrompt,
-    sessionId,
+    sessionId
   }
 
   const loopConfig: AgentLoopConfig = {
@@ -517,7 +550,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     tools: allToolDefs,
     systemPrompt,
     workingFolder: session.workingFolder,
-    signal: ac.signal,
+    signal: ac.signal
   }
 
   const toolCtx: ToolContext = {
@@ -533,7 +566,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     pluginSenderId: task.senderId,
     pluginSenderName: task.senderName,
     channelPermissions: permissions,
-    channelHomedir: homedir,
+    channelHomedir: homedir
   }
 
   // ── Run Agent Loop ──
@@ -553,7 +586,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const loop = runAgentLoop(
     historyMessages, // Clean history without empty assistant turns
     loopConfig,
-    toolCtx,
+    toolCtx
   )
 
   let fullText = ''
@@ -578,12 +611,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     }
     if (pendingToolInputs.size > 0) {
       for (const [toolCallId, partialInput] of pendingToolInputs) {
-        useChatStore.getState().updateToolUseInput(
-          sessionId,
-          assistantMsgId,
-          toolCallId,
-          partialInput
-        )
+        useChatStore
+          .getState()
+          .updateToolUseInput(sessionId, assistantMsgId, toolCallId, partialInput)
       }
       pendingToolInputs.clear()
     }
@@ -593,7 +623,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
         .invoke('plugin:stream:update', {
           pluginId,
           chatId,
-          content: pendingPluginContent,
+          content: pendingPluginContent
         })
         .catch(() => {})
     }
@@ -616,7 +646,10 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     useAgentStore.getState().updateToolCall(toolCallId, { input: pending })
   }
 
-  const scheduleToolInputUpdate = (toolCallId: string, partialInput: Record<string, unknown>): void => {
+  const scheduleToolInputUpdate = (
+    toolCallId: string,
+    partialInput: Record<string, unknown>
+  ): void => {
     const now = Date.now()
     const entry = toolInputThrottle.get(toolCallId) ?? { lastFlush: 0 }
     entry.pending = partialInput
@@ -645,12 +678,14 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     switch (event.type) {
       case 'thinking_encrypted':
         if (event.thinkingEncryptedContent && event.thinkingEncryptedProvider) {
-          useChatStore.getState().setThinkingEncryptedContent(
-            sessionId,
-            assistantMsgId,
-            event.thinkingEncryptedContent,
-            event.thinkingEncryptedProvider
-          )
+          useChatStore
+            .getState()
+            .setThinkingEncryptedContent(
+              sessionId,
+              assistantMsgId,
+              event.thinkingEncryptedContent,
+              event.thinkingEncryptedProvider
+            )
         }
         break
 
@@ -666,14 +701,14 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
           type: 'tool_use',
           id: event.toolCallId,
           name: event.toolName,
-          input: {},
+          input: {}
         })
         useAgentStore.getState().addToolCall({
           id: event.toolCallId,
           name: event.toolName,
           input: {},
           status: 'streaming',
-          requiresApproval: false,
+          requiresApproval: false
         })
         break
 
@@ -686,10 +721,17 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       case 'tool_use_generated':
         flushStreamingState()
         console.log(`[PluginAutoReply] Tool call: ${event.toolUseBlock.name}`)
-        useChatStore.getState().updateToolUseInput(sessionId, assistantMsgId, event.toolUseBlock.id, event.toolUseBlock.input)
+        useChatStore
+          .getState()
+          .updateToolUseInput(
+            sessionId,
+            assistantMsgId,
+            event.toolUseBlock.id,
+            event.toolUseBlock.input
+          )
         flushToolInput(event.toolUseBlock.id)
         useAgentStore.getState().updateToolCall(event.toolUseBlock.id, {
-          input: event.toolUseBlock.input,
+          input: event.toolUseBlock.input
         })
         break
 
@@ -702,7 +744,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
           status: event.toolCall.status,
           output: event.toolCall.output,
           error: event.toolCall.error,
-          completedAt: event.toolCall.completedAt,
+          completedAt: event.toolCall.completedAt
         })
         break
 
@@ -716,16 +758,18 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
               type: 'tool_result' as const,
               toolUseId: tr.toolUseId,
               content: tr.content,
-              isError: tr.isError,
+              isError: tr.isError
             })),
-            createdAt: Date.now(),
+            createdAt: Date.now()
           }
           useChatStore.getState().addMessage(sessionId, toolResultMsg)
         }
         // If new messages are waiting for this session, stop before issuing the
         // next API request so queued messages can be handled first.
         if (hasQueuedPluginTasks(sessionId) || hasPendingSessionMessagesForSession(sessionId)) {
-          console.log(`[PluginAutoReply] Queued message detected at iteration_end, aborting run for session ${sessionId}`)
+          console.log(
+            `[PluginAutoReply] Queued message detected at iteration_end, aborting run for session ${sessionId}`
+          )
           ac.abort()
         }
         break
@@ -762,7 +806,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       await ipcClient.invoke('plugin:stream:finish', {
         pluginId,
         chatId,
-        content: fullText.trim() ? fullText : fallbackMessage,
+        content: fullText.trim() ? fullText : fallbackMessage
       })
       console.log(`[PluginAutoReply] CardKit finished for ${pluginId}:${chatId}`)
     } catch (err) {
@@ -780,7 +824,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
       await ipcClient.invoke('plugin:exec', {
         pluginId,
         action: 'sendMessage',
-        params: { chatId, content: fullText },
+        params: { chatId, content: fullText }
       })
       console.log(`[PluginAutoReply] Sent non-streaming reply for ${pluginId}:${chatId}`)
     } catch (err) {
@@ -820,7 +864,10 @@ export function usePluginAutoReply(): void {
 
 // ── Helper Functions ──
 
-function getProviderConfig(providerId?: string | null, modelOverride?: string | null): ProviderConfig | null {
+function getProviderConfig(
+  providerId?: string | null,
+  modelOverride?: string | null
+): ProviderConfig | null {
   const s = useSettingsStore.getState()
   const store = useProviderStore.getState()
 
@@ -831,7 +878,7 @@ function getProviderConfig(providerId?: string | null, modelOverride?: string | 
       return {
         ...overrideConfig,
         maxTokens: store.getEffectiveMaxTokens(s.maxTokens, modelOverride),
-        temperature: s.temperature,
+        temperature: s.temperature
       }
     }
   }
@@ -842,7 +889,7 @@ function getProviderConfig(providerId?: string | null, modelOverride?: string | 
       ...activeConfig,
       model: modelOverride || activeConfig.model,
       maxTokens: store.getEffectiveMaxTokens(s.maxTokens, modelOverride || activeConfig.model),
-      temperature: s.temperature,
+      temperature: s.temperature
     }
   }
 
@@ -875,7 +922,7 @@ function resolveOpenAiProviderConfig(
 
   return {
     config,
-    type: provider.type as 'openai-chat' | 'openai-responses',
+    type: provider.type as 'openai-chat' | 'openai-responses'
   }
 }
 
@@ -908,9 +955,9 @@ async function transcribeFeishuAudio(params: {
   const response = await fetch(url, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${apiKey}`
     },
-    body: formData,
+    body: formData
   })
 
   if (!response.ok) {
@@ -918,7 +965,7 @@ async function transcribeFeishuAudio(params: {
     throw new Error(`Transcription API error: ${response.status} ${errorText}`)
   }
 
-  const result = await response.json() as { text?: string }
+  const result = (await response.json()) as { text?: string }
   return result.text ?? ''
 }
 

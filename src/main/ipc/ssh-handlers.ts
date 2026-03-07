@@ -18,6 +18,13 @@ import {
   type SshConfigGroup,
   type SshConfigConnection
 } from '../ssh/ssh-config'
+import {
+  buildFileSnapshot,
+  buildOpaqueExistingSnapshot,
+  recordSshTextWriteChange,
+  registerSshChangeAdapter,
+  type FileSnapshot
+} from './agent-change-handlers'
 
 // ── SSH Session Manager ──
 
@@ -151,7 +158,7 @@ function broadcastUploadEvent(evt: UploadEvent): void {
 
 function nowStamp(): string {
   const d = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
+  const pad = (n: number): string => String(n).padStart(2, '0')
   return (
     String(d.getFullYear()) +
     pad(d.getMonth() + 1) +
@@ -267,12 +274,13 @@ async function uploadFileWithProgress(
     const writeStream = sftp.createWriteStream(remotePath)
     let lastEmit = 0
 
-    const cleanup = () => {
+    const cleanup = (): void => {
       readStream.removeAllListeners()
       writeStream.removeAllListeners()
     }
 
-    task.cancel = async (_reason?: string) => {
+    task.cancel = async (reason?: string): Promise<void> => {
+      void reason
       if (task.canceled) return
       task.canceled = true
       broadcastUploadEvent({ taskId, connectionId, stage: 'canceled', message: 'Canceled' })
@@ -916,6 +924,11 @@ function recordOutput(session: SshSession, data: Buffer): void {
 }
 
 export function registerSshHandlers(): void {
+  registerSshChangeAdapter({
+    readSnapshot: readSshTextSnapshot,
+    writeText: writeSshTextFile,
+    deleteFile: deleteSshFile
+  })
   ensureSshConfigWatcher()
 
   // ── Group CRUD ──
@@ -1499,9 +1512,11 @@ export function registerSshHandlers(): void {
               if (connection.authType === 'password') {
                 errorMessage = 'Password authentication failed. Please check your password.'
               } else if (connection.authType === 'privateKey') {
-                errorMessage = 'Private key authentication failed. Please check your key file and passphrase.'
+                errorMessage =
+                  'Private key authentication failed. Please check your key file and passphrase.'
               } else if (connection.authType === 'agent') {
-                errorMessage = 'SSH agent authentication failed. Please check your SSH agent is running.'
+                errorMessage =
+                  'SSH agent authentication failed. Please check your SSH agent is running.'
               }
             } else if (errorMessage.includes('ECONNREFUSED')) {
               errorMessage = 'Connection refused. Please check the host and port.'
@@ -1655,11 +1670,20 @@ export function registerSshHandlers(): void {
 
   ipcMain.handle(
     'ssh:fs:write-file',
-    async (_event, args: { connectionId: string; path: string; content: string }) => {
+    async (
+      _event,
+      args: {
+        connectionId: string
+        path: string
+        content: string
+        changeMeta?: { runId?: string; sessionId?: string; toolUseId?: string; toolName?: string }
+      }
+    ) => {
       try {
         await withFileSession(args.connectionId, async (session) => {
           const sftp = await getSftp(session)
           const resolvedPath = await resolveSftpPath(session, args.path)
+          const before = await readSshTextSnapshot(args.connectionId, resolvedPath)
 
           // Ensure parent directory exists
           const dir = path.posix.dirname(resolvedPath)
@@ -1675,6 +1699,14 @@ export function registerSshHandlers(): void {
             SFTP_LIST_DIR_TIMEOUT_MS,
             'SFTP write-file timeout'
           )
+
+          recordSshTextWriteChange({
+            meta: args.changeMeta,
+            connectionId: args.connectionId,
+            filePath: resolvedPath,
+            before,
+            afterText: args.content
+          })
         })
         return { success: true }
       } catch (err) {
@@ -1889,7 +1921,7 @@ export function registerSshHandlers(): void {
             const readStream = sftp.createReadStream(remotePath)
             const writeStream = fs.createWriteStream(args.localPath)
 
-            const onError = (e: unknown) => {
+            const onError = (e: unknown): void => {
               try {
                 readStream.destroy()
               } catch {
@@ -2160,6 +2192,67 @@ async function sftpMkdirRecursive(sftp: SFTPWrapper, remotePath: string): Promis
 
 function shellEscape(str: string): string {
   return "'" + str.replace(/'/g, "'\\''") + "'"
+}
+
+async function readSshTextSnapshot(connectionId: string, filePath: string): Promise<FileSnapshot> {
+  return await withFileSession(connectionId, async (session) => {
+    const sftp = await getSftp(session)
+    const resolvedPath = await resolveSftpPath(session, filePath)
+    const stat = await sftpStat(sftp, resolvedPath)
+    if (!stat) return buildFileSnapshot(false)
+    if (!stat.isFile()) return buildOpaqueExistingSnapshot()
+    const text = await withTimeout(
+      new Promise<string>((resolve, reject) => {
+        sftp.readFile(resolvedPath, 'utf-8', (err, data) => {
+          if (err) return reject(err)
+          resolve(typeof data === 'string' ? data : data.toString('utf-8'))
+        })
+      }),
+      SFTP_LIST_DIR_TIMEOUT_MS,
+      'SFTP read-file timeout'
+    )
+    return buildFileSnapshot(true, text)
+  })
+}
+
+async function writeSshTextFile(
+  connectionId: string,
+  filePath: string,
+  content: string
+): Promise<void> {
+  await withFileSession(connectionId, async (session) => {
+    const sftp = await getSftp(session)
+    const resolvedPath = await resolveSftpPath(session, filePath)
+    const dir = path.posix.dirname(resolvedPath)
+    await sftpMkdirRecursive(sftp, dir)
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        sftp.writeFile(resolvedPath, content, 'utf-8', (err) => {
+          if (err) return reject(err)
+          resolve()
+        })
+      }),
+      SFTP_LIST_DIR_TIMEOUT_MS,
+      'SFTP write-file timeout'
+    )
+  })
+}
+
+async function deleteSshFile(connectionId: string, filePath: string): Promise<void> {
+  await withFileSession(connectionId, async (session) => {
+    const sftp = await getSftp(session)
+    const resolvedPath = await resolveSftpPath(session, filePath)
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        sftp.unlink(resolvedPath, (err) => {
+          if (err) return reject(err)
+          resolve()
+        })
+      }),
+      SFTP_LIST_DIR_TIMEOUT_MS,
+      'SFTP delete timeout'
+    )
+  })
 }
 
 // ── Cleanup ──

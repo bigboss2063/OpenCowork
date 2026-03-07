@@ -50,6 +50,19 @@ function sshArgs(ctx: ToolContext, extra: Record<string, unknown>): Record<strin
   return { connectionId: ctx.sshConnectionId, ...extra }
 }
 
+function buildChangeMeta(
+  ctx: ToolContext,
+  toolName: 'Write' | 'Edit'
+): Record<string, unknown> | undefined {
+  if (!ctx.agentRunId) return undefined
+  return {
+    runId: ctx.agentRunId,
+    sessionId: ctx.sessionId,
+    toolUseId: ctx.currentToolUseId,
+    toolName
+  }
+}
+
 function localWriteArgs(
   ctx: ToolContext,
   path: string,
@@ -59,17 +72,21 @@ function localWriteArgs(
   return {
     path,
     content,
-    ...(ctx.agentRunId
-      ? {
-          changeMeta: {
-            runId: ctx.agentRunId,
-            sessionId: ctx.sessionId,
-            toolUseId: ctx.currentToolUseId,
-            toolName
-          }
-        }
-      : {})
+    ...(buildChangeMeta(ctx, toolName) ? { changeMeta: buildChangeMeta(ctx, toolName) } : {})
   }
+}
+
+function sshWriteArgs(
+  ctx: ToolContext,
+  path: string,
+  content: string,
+  toolName: 'Write' | 'Edit'
+): Record<string, unknown> {
+  return sshArgs(ctx, {
+    path,
+    content,
+    ...(buildChangeMeta(ctx, toolName) ? { changeMeta: buildChangeMeta(ctx, toolName) } : {})
+  })
 }
 
 // ── Plugin path permission helpers ──
@@ -222,10 +239,7 @@ const writeHandler: ToolHandler = {
     if (isSsh(ctx)) {
       const result = await ctx.ipc.invoke(
         IPC.SSH_FS_WRITE_FILE,
-        sshArgs(ctx, {
-          path: resolvedPath,
-          content: input.content
-        })
+        sshWriteArgs(ctx, resolvedPath, input.content, 'Write')
       )
       if (isErrorResult(result)) throw new Error(`Write failed: ${result.error}`)
       return JSON.stringify({ success: true, path: resolvedPath })
@@ -307,7 +321,7 @@ const editHandler: ToolHandler = {
         content.slice(0, idxFallback) + replacement + content.slice(idxFallback + oldStr.length)
       const writeChFallback = isSsh(ctx) ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE
       const writeArgsFallback = isSsh(ctx)
-        ? sshArgs(ctx, { path: resolvedPath, content: updatedFallback })
+        ? sshWriteArgs(ctx, resolvedPath, updatedFallback, 'Edit')
         : localWriteArgs(ctx, resolvedPath, updatedFallback, 'Edit')
       await ctx.ipc.invoke(writeChFallback, writeArgsFallback)
       return JSON.stringify({ success: true })
@@ -325,7 +339,7 @@ const editHandler: ToolHandler = {
 
     const writeCh = isSsh(ctx) ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE
     const writeArgs = isSsh(ctx)
-      ? sshArgs(ctx, { path: resolvedPath, content: updated })
+      ? sshWriteArgs(ctx, resolvedPath, updated, 'Edit')
       : localWriteArgs(ctx, resolvedPath, updated, 'Edit')
     await ctx.ipc.invoke(writeCh, writeArgs)
     return JSON.stringify({ success: true })

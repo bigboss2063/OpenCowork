@@ -1,5 +1,72 @@
 import { toolRegistry } from './tool-registry'
 
+export type PromptEnvironmentContext = {
+  target: 'local' | 'ssh'
+  operatingSystem: string
+  shell: string
+  host?: string
+  connectionName?: string
+  pathStyle?: 'windows' | 'posix' | 'unknown'
+}
+
+export function resolvePromptEnvironmentContext(options: {
+  sshConnectionId?: string | null
+  workingFolder?: string
+  sshConnection?: {
+    name?: string | null
+    host?: string | null
+    defaultDirectory?: string | null
+  } | null
+}): PromptEnvironmentContext {
+  const { sshConnectionId, workingFolder, sshConnection } = options
+
+  const rawPlatform = typeof navigator !== 'undefined' ? navigator.platform : 'unknown'
+  const localOperatingSystem = rawPlatform.startsWith('Win')
+    ? 'Windows'
+    : rawPlatform.startsWith('Mac')
+      ? 'macOS'
+      : rawPlatform.startsWith('Linux')
+        ? 'Linux'
+        : rawPlatform
+  const localShell = rawPlatform.startsWith('Win') ? 'PowerShell' : 'bash'
+
+  if (!sshConnectionId) {
+    return {
+      target: 'local',
+      operatingSystem: localOperatingSystem,
+      shell: localShell
+    }
+  }
+
+  const pathHint =
+    workingFolder?.trim() ||
+    sshConnection?.defaultDirectory?.trim() ||
+    sshConnection?.host?.trim() ||
+    ''
+  const pathStyle = /^[A-Za-z]:[\\/]/.test(pathHint)
+    ? 'windows'
+    : pathHint.startsWith('/') || pathHint.startsWith('~')
+      ? 'posix'
+      : 'unknown'
+
+  return {
+    target: 'ssh',
+    operatingSystem:
+      pathStyle === 'windows'
+        ? 'Remote Windows host (via SSH)'
+        : pathStyle === 'posix'
+          ? 'Remote POSIX host (via SSH)'
+          : 'Remote host via SSH',
+    shell:
+      pathStyle === 'windows'
+        ? 'Remote shell via SSH (likely PowerShell or cmd)'
+        : 'Remote shell via SSH (prefer POSIX-style commands unless evidence shows otherwise)',
+    host: sshConnection?.host?.trim() || undefined,
+    connectionName: sshConnection?.name?.trim() || undefined,
+    pathStyle
+  }
+}
+
 /**
  * Build a system prompt for the agent loop that includes tool descriptions
  * and behavioral instructions based on the current mode.
@@ -15,6 +82,7 @@ export function buildSystemPrompt(options: {
   agentsMemory?: string
   globalMemory?: string
   globalMemoryPath?: string
+  environmentContext?: PromptEnvironmentContext
 }): string {
   const {
     mode,
@@ -29,6 +97,7 @@ export function buildSystemPrompt(options: {
   } = options
 
   const toolDefs = options.toolDefs ?? toolRegistry.getDefinitions()
+  const environmentContext = options.environmentContext ?? resolvePromptEnvironmentContext({})
 
   const parts: string[] = []
 
@@ -42,23 +111,34 @@ export function buildSystemPrompt(options: {
     `You are **OpenCoWork**, a powerful agentic AI ${modeRole} running as a desktop Agents application.`,
     `OpenCoWork is developed by the **AIDotNet** team. Core contributor: **token** (GitHub: @AIDotNet).`,
     taskScope,
-    `Be mindful that you are not the only one working in this computing environment. Do not overstep your bounds or create unnecessary files.`,
+    `Be mindful that you are not the only one working in this computing environment. Do not overstep your bounds or create unnecessary files.`
   )
 
   // ── Environment Context ──
-  const rawPlatform = typeof navigator !== 'undefined' ? navigator.platform : 'unknown'
-  const osName = rawPlatform.startsWith('Win')
-    ? 'Windows'
-    : rawPlatform.startsWith('Mac')
-      ? 'macOS'
-      : rawPlatform.startsWith('Linux')
-        ? 'Linux'
-        : rawPlatform
-  const shell = rawPlatform.startsWith('Win') ? 'PowerShell' : 'bash'
+  const executionTarget =
+    environmentContext.target === 'ssh'
+      ? environmentContext.host
+        ? `SSH Remote Host (${environmentContext.host})`
+        : 'SSH Remote Host'
+      : 'Local Machine'
+  parts.push(`\n## Environment`, `- Execution Target: ${executionTarget}`)
+  if (environmentContext.connectionName) {
+    parts.push(`- SSH Connection: ${environmentContext.connectionName}`)
+  }
+  parts.push(`- Operating System: ${environmentContext.operatingSystem}`)
+  parts.push(`- Shell: ${environmentContext.shell}`)
+  if (environmentContext.target === 'ssh') {
+    parts.push(`- Filesystem Scope: Remote filesystem over SSH`)
+    if (environmentContext.pathStyle === 'posix') {
+      parts.push(`- Path Style: Prefer POSIX-style paths unless evidence suggests otherwise`)
+    } else if (environmentContext.pathStyle === 'windows') {
+      parts.push(`- Path Style: Prefer Windows-style paths on the remote host`)
+    }
+    parts.push(
+      `- Remote Guidance: Do not assume the local computer's OS, shell, paths, or home directory when SSH is active.`
+    )
+  }
   parts.push(
-    `\n## Environment`,
-    `- Operating System: ${osName}`,
-    `- Shell: ${shell}`,
     `\n**IMPORTANT: You MUST respond in ${language === 'zh' ? 'Chinese (中文)' : 'English'} unless the user explicitly requests otherwise.**`
   )
 
@@ -76,14 +156,16 @@ export function buildSystemPrompt(options: {
     `- Do not start with praise or acknowledgment phrases. Start with substance.`,
     `- Do not add or remove comments or documentation unless asked.`,
     `- End with a short status summary.`,
-    `</communication_guidelines>`,
+    `</communication_guidelines>`
   )
 
   // ── Mode-Specific Instructions ──
   if (mode === 'cowork') {
     parts.push(
       `\n## Mode: Cowork`,
-      `You have access to the user's local filesystem. When not in Plan Mode, you may execute terminal commands with the Bash tool.`,
+      environmentContext.target === 'ssh'
+        ? `You have access to the selected remote filesystem over SSH. When not in Plan Mode, terminal commands and file tools operate against the remote host unless a tool explicitly says otherwise.`
+        : `You have access to the user's local filesystem. When not in Plan Mode, you may execute terminal commands with the Bash tool.`,
       `Follow a Plan-Act-Observe loop: understand the request, plan your approach, use tools to act, then observe results before continuing.`,
       `Always read files before editing them. Use the Edit tool for precise changes — never rewrite entire files unless creating new ones.`,
       `When running Bash commands, explain what you're doing and why.`
@@ -92,7 +174,9 @@ export function buildSystemPrompt(options: {
     parts.push(
       `\n## Mode: Code`,
       `Focus on writing clean, well-structured code.`,
-      `You have access to the filesystem. When not in Plan Mode, you may create or modify files.`,
+      environmentContext.target === 'ssh'
+        ? `You have access to the selected remote filesystem over SSH. When not in Plan Mode, create or modify files on the remote host.`
+        : `You have access to the filesystem. When not in Plan Mode, you may create or modify files.`,
       `Prefer editing existing files over rewriting them entirely.`
     )
   }
@@ -174,8 +258,12 @@ export function buildSystemPrompt(options: {
     // ── Running Commands ──
     parts.push(
       `\n<running_commands>`,
-      `You can run terminal commands on the user's machine.`,
-      `- Use the Bash tool; never include \`cd\` in the command. Set \`cwd\` instead.`,
+      environmentContext.target === 'ssh'
+        ? `You can run terminal commands on the selected SSH remote host.`
+        : `You can run terminal commands on the user's machine.`,
+      environmentContext.target === 'ssh'
+        ? `- Use the Bash tool; never include \`cd\` in the command. Set \`cwd\` instead so it resolves on the remote host.`
+        : `- Use the Bash tool; never include \`cd\` in the command. Set \`cwd\` instead.`,
       `- Check for existing dev servers before starting new ones.`,
       `- Unsafe commands require explicit user approval.`,
       `- Never delete files, install system packages, or expose secrets in output.`,
@@ -196,7 +284,9 @@ export function buildSystemPrompt(options: {
   if (workingFolder) {
     parts.push(`\n## Working Folder\n\`${workingFolder}\``)
     parts.push(
-      `All relative paths should be resolved against this folder. Use this as the default cwd for Bash commands.`
+      environmentContext.target === 'ssh'
+        ? `All relative paths should be resolved against this remote folder. Use this as the default cwd for Bash commands on the remote host.`
+        : `All relative paths should be resolved against this folder. Use this as the default cwd for Bash commands.`
     )
   } else {
     parts.push(
@@ -214,12 +304,7 @@ export function buildSystemPrompt(options: {
     )
 
     // ── Agent Teams ──
-    const teamToolNames = [
-      'TeamCreate',
-      'SendMessage',
-      'TeamStatus',
-      'TeamDelete'
-    ]
+    const teamToolNames = ['TeamCreate', 'SendMessage', 'TeamStatus', 'TeamDelete']
     const hasTeamTools = teamToolNames.some((n) => toolDefs.some((t) => t.name === n))
     if (hasTeamTools) {
       if (hasActiveTeam) {
@@ -270,28 +355,28 @@ export function buildSystemPrompt(options: {
     }
 
     // ── Global Memory (MEMORY.md) ──
-  const memoryPath = globalMemoryPath?.trim()
-  const memoryPathLabel = memoryPath ? `\`${memoryPath}\`` : 'path unavailable'
+    const memoryPath = globalMemoryPath?.trim()
+    const memoryPathLabel = memoryPath ? `\`${memoryPath}\`` : 'path unavailable'
 
-  if (globalMemory?.trim()) {
+    if (globalMemory?.trim()) {
+      parts.push(
+        `\n<global_memory>`,
+        `The following is MEMORY.md from ${memoryPathLabel}, containing cross-session durable memory.`,
+        ``,
+        globalMemory.trim(),
+        `</global_memory>`
+      )
+    }
+
+    // ── Global MEMORY.md File Management ──
     parts.push(
-      `\n<global_memory>`,
-      `The following is MEMORY.md from ${memoryPathLabel}, containing cross-session durable memory.`,
-      ``,
-      globalMemory.trim(),
-      `</global_memory>`
+      `\n<global_memory_file>`,
+      `Global memory file: ${memoryPathLabel} for durable, cross-session info.`,
+      `Store stable user preferences, durable decisions/workflow habits, long-lived defaults, and explicit "remember this" requests.`,
+      `Do not store secrets, temporary notes, or project-specific details (use AGENTS.md).`,
+      `Update by reading first, then append/adjust concise entries and remove outdated ones.`,
+      `</global_memory_file>`
     )
-  }
-
-  // ── Global MEMORY.md File Management ──
-  parts.push(
-    `\n<global_memory_file>`,
-    `Global memory file: ${memoryPathLabel} for durable, cross-session info.`,
-    `Store stable user preferences, durable decisions/workflow habits, long-lived defaults, and explicit "remember this" requests.`,
-    `Do not store secrets, temporary notes, or project-specific details (use AGENTS.md).`,
-    `Update by reading first, then append/adjust concise entries and remove outdated ones.`,
-    `</global_memory_file>`
-  )
 
     // ── AGENTS.md Memory File Management ──
     if (workingFolder) {

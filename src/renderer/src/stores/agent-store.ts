@@ -241,10 +241,14 @@ export interface AgentRunFileChange {
   toolUseId?: string
   toolName?: string
   filePath: string
+  transport: 'local' | 'ssh'
+  connectionId?: string
   op: 'create' | 'modify'
+  status: 'open' | 'accepted' | 'reverted' | 'conflicted'
   before: AgentFileSnapshot
   after: AgentFileSnapshot
   createdAt: number
+  acceptedAt?: number
   revertedAt?: number
   conflict?: string
 }
@@ -253,7 +257,7 @@ export interface AgentRunChangeSet {
   runId: string
   sessionId?: string
   assistantMessageId: string
-  status: 'open' | 'accepted' | 'reverting' | 'reverted' | 'conflicted'
+  status: 'open' | 'partial' | 'accepted' | 'reverting' | 'reverted' | 'conflicted'
   changes: AgentRunFileChange[]
   createdAt: number
   updatedAt: number
@@ -328,7 +332,9 @@ interface AgentStore {
   updateToolCall: (id: string, patch: Partial<ToolCallState>) => void
   refreshRunChanges: (runId: string) => Promise<void>
   acceptRunChanges: (runId: string) => Promise<{ error?: string }>
+  acceptFileChange: (runId: string, changeId: string) => Promise<{ error?: string }>
   rollbackRunChanges: (runId: string) => Promise<{ error?: string }>
+  rollbackFileChange: (runId: string, changeId: string) => Promise<{ error?: string }>
   clearToolCalls: () => void
   abort: () => void
 
@@ -719,10 +725,55 @@ export const useAgentStore = create<AgentStore>()(
         }
       },
 
+      acceptFileChange: async (runId, changeId) => {
+        if (!runId || !changeId) return { error: 'runId and changeId are required' }
+        try {
+          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_ACCEPT_FILE, { runId, changeId })
+          if (isAgentChangeError(result)) return { error: result.error }
+          const changeset =
+            result && typeof result === 'object' && 'changeset' in result
+              ? (result as { changeset?: AgentRunChangeSet }).changeset
+              : undefined
+          set((state) => {
+            if (changeset) {
+              state.runChangesByRunId[runId] = changeset
+              trimRunChangesMap(state.runChangesByRunId)
+            }
+          })
+          return {}
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) }
+        }
+      },
+
       rollbackRunChanges: async (runId) => {
         if (!runId) return { error: 'runId is required' }
         try {
           const result = await ipcClient.invoke(IPC.AGENT_CHANGES_ROLLBACK, { runId })
+          if (isAgentChangeError(result)) return { error: result.error }
+          const changeset =
+            result && typeof result === 'object' && 'changeset' in result
+              ? (result as { changeset?: AgentRunChangeSet }).changeset
+              : undefined
+          set((state) => {
+            if (changeset) {
+              state.runChangesByRunId[runId] = changeset
+              trimRunChangesMap(state.runChangesByRunId)
+            }
+          })
+          return {}
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) }
+        }
+      },
+
+      rollbackFileChange: async (runId, changeId) => {
+        if (!runId || !changeId) return { error: 'runId and changeId are required' }
+        try {
+          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_ROLLBACK_FILE, {
+            runId,
+            changeId
+          })
           if (isAgentChangeError(result)) return { error: result.error }
           const changeset =
             result && typeof result === 'object' && 'changeset' in result

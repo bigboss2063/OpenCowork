@@ -10,7 +10,10 @@ import { useUIStore } from '@renderer/stores/ui-store'
 import { useSshStore } from '@renderer/stores/ssh-store'
 import { runAgentLoop } from '@renderer/lib/agent/agent-loop'
 import { toolRegistry } from '@renderer/lib/agent/tool-registry'
-import { buildSystemPrompt } from '@renderer/lib/agent/system-prompt'
+import {
+  buildSystemPrompt,
+  resolvePromptEnvironmentContext
+} from '@renderer/lib/agent/system-prompt'
 import { subAgentEvents } from '@renderer/lib/agent/sub-agents/events'
 import { abortAllTeammates } from '@renderer/lib/agent/teams/teammate-runner'
 import { TEAM_TOOL_NAMES } from '@renderer/lib/agent/teams/register'
@@ -1035,6 +1038,16 @@ export function useChatActions(): {
         const globalMemorySnapshot = await loadGlobalMemorySnapshot(ipcClient)
         const globalMemory = globalMemorySnapshot.content
         const globalMemoryPath = globalMemorySnapshot.path
+        const sshConnection = session?.sshConnectionId
+          ? useSshStore
+              .getState()
+              .connections.find((connection) => connection.id === session.sshConnectionId)
+          : undefined
+        const environmentContext = resolvePromptEnvironmentContext({
+          sshConnectionId: session?.sshConnectionId,
+          workingFolder: session?.workingFolder,
+          sshConnection
+        })
 
         const agentSystemPrompt = buildSystemPrompt({
           mode: mode as 'cowork' | 'code',
@@ -1045,7 +1058,8 @@ export function useChatActions(): {
           planMode: isPlanMode,
           agentsMemory,
           globalMemory,
-          globalMemoryPath
+          globalMemoryPath,
+          environmentContext
         })
         const agentProviderConfig: ProviderConfig = {
           ...baseProviderConfig,

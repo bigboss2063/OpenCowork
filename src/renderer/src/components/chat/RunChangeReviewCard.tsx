@@ -29,7 +29,14 @@ export function RunChangeReviewCard({
   const [isAccepting, setIsAccepting] = React.useState(false)
   const [isRollingBack, setIsRollingBack] = React.useState(false)
   const fileLabels = React.useMemo(() => summarizeFiles(changeSet), [changeSet])
-  const actionable = changeSet.status === 'open' || changeSet.status === 'conflicted'
+  const pendingCount = React.useMemo(
+    () =>
+      changeSet.changes.filter(
+        (change) => change.status === 'open' || change.status === 'conflicted'
+      ).length,
+    [changeSet]
+  )
+  const actionable = pendingCount > 0
 
   const handleAccept = async (): Promise<void> => {
     setIsAccepting(true)
@@ -51,12 +58,14 @@ export function RunChangeReviewCard({
 
   const statusLabel =
     changeSet.status === 'accepted'
-      ? 'Changes accepted'
+      ? 'All changes accepted'
       : changeSet.status === 'reverted'
-        ? 'Changes reverted'
+        ? 'All changes reverted'
         : changeSet.status === 'conflicted'
-          ? 'Rollback has conflicts'
-          : 'Review changes'
+          ? 'Some files need attention'
+          : changeSet.status === 'partial'
+            ? 'Some files already handled'
+            : 'Review changes'
 
   return (
     <div className="mt-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
@@ -66,7 +75,7 @@ export function RunChangeReviewCard({
             <CheckCircle2 className="size-3.5 text-emerald-500" />
             <span>{statusLabel}</span>
             <span className="text-[10px] text-muted-foreground/60">
-              {fileLabels.length} files changed
+              {fileLabels.length} files changed · {pendingCount} pending
             </span>
           </div>
           <div className="flex flex-wrap gap-1.5 text-[10px] text-muted-foreground/70">
@@ -81,6 +90,11 @@ export function RunChangeReviewCard({
               </span>
             )}
           </div>
+          {pendingCount > 0 && (
+            <p className="text-[10px] text-muted-foreground/60">
+              You can handle files one by one below, or apply bulk actions here.
+            </p>
+          )}
           {changeSet.status === 'conflicted' && (
             <p className="text-[10px] text-amber-500/80">
               Some files changed after the agent finished, so only safe files were reverted.

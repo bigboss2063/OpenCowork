@@ -7,8 +7,10 @@ import { cn } from '@renderer/lib/utils'
 import type { ToolCallStatus } from '@renderer/lib/agent/types'
 import type { ToolResultContent } from '@renderer/lib/api/types'
 import type { AgentRunFileChange } from '@renderer/stores/agent-store'
+import { useAgentStore } from '@renderer/stores/agent-store'
 import { MONO_FONT } from '@renderer/lib/constants'
 import { AnimatePresence, motion } from 'motion/react'
+import { Button } from '@renderer/components/ui/button'
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -425,6 +427,20 @@ function NewFileContent({
   )
 }
 
+function trackedStatusLabel(change: AgentRunFileChange): string {
+  if (change.status === 'accepted') return 'Accepted'
+  if (change.status === 'reverted') return 'Reverted'
+  if (change.status === 'conflicted') return 'Conflict'
+  return 'Pending'
+}
+
+function trackedStatusTone(change: AgentRunFileChange): string {
+  if (change.status === 'accepted') return 'bg-emerald-500/10 text-emerald-500'
+  if (change.status === 'reverted') return 'bg-zinc-500/10 text-zinc-300'
+  if (change.status === 'conflicted') return 'bg-amber-500/10 text-amber-500'
+  return change.transport === 'ssh' ? 'bg-sky-500/10 text-sky-400' : 'bg-blue-500/10 text-blue-400'
+}
+
 // ── Main Component ───────────────────────────────────────────────
 
 export function FileChangeCard({
@@ -439,6 +455,10 @@ export function FileChangeCard({
 }: FileChangeCardProps): React.JSX.Element {
   const { t } = useTranslation('chat')
   const [collapsed, setCollapsed] = React.useState(false)
+  const acceptFileChange = useAgentStore((state) => state.acceptFileChange)
+  const rollbackFileChange = useAgentStore((state) => state.rollbackFileChange)
+  const [isAcceptingFile, setIsAcceptingFile] = React.useState(false)
+  const [isRollingBackFile, setIsRollingBackFile] = React.useState(false)
 
   // Auto-collapse when tool completes successfully
   const prevStatusRef = React.useRef(status)
@@ -453,6 +473,8 @@ export function FileChangeCard({
   const elapsed =
     startedAt && completedAt ? ((completedAt - startedAt) / 1000).toFixed(1) + 's' : null
   const outputStr = typeof output === 'string' ? output : undefined
+  const isFileActionable =
+    trackedChange?.status === 'open' || trackedChange?.status === 'conflicted'
   const isSuccess = outputStr
     ? outputStr.includes('"success"') || outputStr.includes('success')
     : false
@@ -466,11 +488,35 @@ export function FileChangeCard({
         ? 'border-blue-500/30'
         : status === 'error' || (isOutputError && !isSuccess)
           ? 'border-destructive/30'
-          : name === 'Write'
-            ? 'border-green-500/20'
-            : name === 'Delete'
-              ? 'border-red-500/20'
-              : 'border-amber-500/20'
+          : trackedChange?.status === 'conflicted'
+            ? 'border-amber-500/30'
+            : trackedChange?.status === 'accepted'
+              ? 'border-emerald-500/20'
+              : name === 'Write'
+                ? 'border-green-500/20'
+                : name === 'Delete'
+                  ? 'border-red-500/20'
+                  : 'border-amber-500/20'
+
+  const handleAcceptFile = async (): Promise<void> => {
+    if (!trackedChange || !isFileActionable) return
+    setIsAcceptingFile(true)
+    try {
+      await acceptFileChange(trackedChange.runId, trackedChange.id)
+    } finally {
+      setIsAcceptingFile(false)
+    }
+  }
+
+  const handleRollbackFile = async (): Promise<void> => {
+    if (!trackedChange || !isFileActionable) return
+    setIsRollingBackFile(true)
+    try {
+      await rollbackFileChange(trackedChange.runId, trackedChange.id)
+    } finally {
+      setIsRollingBackFile(false)
+    }
+  }
 
   return (
     <div
@@ -504,6 +550,17 @@ export function FileChangeCard({
           {shortPath(filePath)}
         </span>
         <ChangeStats name={name} input={input} trackedChange={trackedChange} />
+        {trackedChange && (
+          <span
+            className={cn(
+              'rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide',
+              trackedStatusTone(trackedChange)
+            )}
+          >
+            {trackedChange.transport === 'ssh' ? 'SSH' : 'Local'} ·{' '}
+            {trackedStatusLabel(trackedChange)}
+          </span>
+        )}
         {elapsed && (
           <span className="text-[9px] text-muted-foreground/30 tabular-nums shrink-0">
             {elapsed}
@@ -564,6 +621,44 @@ export function FileChangeCard({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {trackedChange && (
+        <div className="border-t border-border/50 bg-background/40 px-3 py-2">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[10px] text-muted-foreground/70">
+              {trackedChange.status === 'accepted'
+                ? 'This file is kept.'
+                : trackedChange.status === 'reverted'
+                  ? 'This file has been restored.'
+                  : trackedChange.status === 'conflicted'
+                    ? (trackedChange.conflict ?? 'This file has a rollback conflict.')
+                    : 'You can keep or revert this file individually.'}
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={handleAcceptFile}
+                disabled={!isFileActionable || isAcceptingFile || isRollingBackFile}
+              >
+                {isAcceptingFile ? <Loader2 className="size-3 animate-spin" /> : null}
+                {t('action.allow', { ns: 'common' })}
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant={trackedChange.status === 'conflicted' ? 'outline' : 'destructive'}
+                onClick={handleRollbackFile}
+                disabled={!isFileActionable || isAcceptingFile || isRollingBackFile}
+              >
+                {isRollingBackFile ? <Loader2 className="size-3 animate-spin" /> : null}
+                {t('action.undo', { ns: 'common' })}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Error / output feedback */}
       {error && (
