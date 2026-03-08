@@ -25,6 +25,7 @@ import {
   registerSshChangeAdapter,
   type FileSnapshot
 } from './agent-change-handlers'
+import { createGitIgnoreMatcher } from './gitignore-utils'
 
 // ── SSH Session Manager ──
 
@@ -353,6 +354,20 @@ function isTimeoutError(err: unknown): boolean {
   )
 }
 
+function normalizeSftpErrorMessage(message: string): string {
+  if (message.includes('Packet length') && message.includes('exceeds maxlength')) {
+    return 'Remote SFTP is unavailable or returned non-SFTP data'
+  }
+  return message
+}
+
+function toSftpError(err: unknown): Error {
+  if (err instanceof Error) {
+    return new Error(normalizeSftpErrorMessage(err.message))
+  }
+  return new Error(normalizeSftpErrorMessage(String(err)))
+}
+
 interface SshGroupRow {
   id: string
   name: string
@@ -567,7 +582,7 @@ async function getSftp(session: SshLikeSession): Promise<SFTPWrapper> {
   const sftp = await withTimeout(
     new Promise<SFTPWrapper>((resolve, reject) => {
       session.client.sftp((err, sftp) => {
-        if (err) return reject(err)
+        if (err) return reject(toSftpError(err))
         session.sftp = sftp
         resolve(sftp)
       })
@@ -626,7 +641,13 @@ async function getHomeDir(session: SshLikeSession): Promise<string | null> {
       'SFTP realpath timeout'
     )
   } catch {
-    homeDir = null
+    const shellSession = findSessionByConnection(session.connectionId)
+    if (shellSession) {
+      const result = await sshExec(shellSession, 'printf %s "$HOME"', 10000)
+      if (result.exitCode === 0) {
+        homeDir = result.stdout.trim() || null
+      }
+    }
   }
   if (homeDir) session.homeDir = homeDir
   return homeDir
@@ -639,6 +660,60 @@ async function resolveSftpPath(session: SshLikeSession, inputPath: string): Prom
   if (inputPath === '~') return homeDir
   if (inputPath.startsWith('~/')) return path.posix.join(homeDir, inputPath.slice(2))
   return inputPath
+}
+
+async function readRemoteTextFileIfExists(
+  session: SshLikeSession,
+  filePath: string
+): Promise<string | null> {
+  try {
+    const sftp = await getSftp(session)
+    return await withTimeout(
+      new Promise<string | null>((resolve) => {
+        sftp.readFile(filePath, 'utf-8', (err, data) => {
+          if (err) return resolve(null)
+          resolve(typeof data === 'string' ? data : data.toString('utf-8'))
+        })
+      }),
+      SFTP_OPEN_TIMEOUT_MS,
+      'SFTP read-file timeout'
+    )
+  } catch {
+    return null
+  }
+}
+
+async function resolveRemoteGitIgnoreRoot(
+  session: SshLikeSession,
+  searchPath: string
+): Promise<string> {
+  const candidateDirs = [searchPath, path.posix.dirname(searchPath)].filter(
+    (value, index, list) => value && list.indexOf(value) === index
+  )
+
+  for (const candidateDir of candidateDirs) {
+    const result = await sshExec(
+      session,
+      `git -C ${shellEscape(candidateDir)} rev-parse --show-toplevel 2>/dev/null`
+    )
+    if (result.exitCode === 0) {
+      const gitRoot = result.stdout.trim().split(/\r?\n/).find(Boolean)
+      if (gitRoot) return gitRoot
+    }
+  }
+
+  return searchPath
+}
+
+async function createRemoteGitIgnoreContext(
+  session: SshLikeSession,
+  searchPath: string
+): Promise<ReturnType<typeof createGitIgnoreMatcher>> {
+  const rootDir = await resolveRemoteGitIgnoreRoot(session, searchPath)
+  return createGitIgnoreMatcher({
+    rootDir,
+    readIgnoreFile: async (filePath) => await readRemoteTextFileIfExists(session, filePath)
+  })
 }
 
 function getSftpListCacheKey(connectionId: string, resolvedPath: string): string {
@@ -727,6 +802,21 @@ function mapSftpEntries(
   })
 }
 
+async function filterSftpEntries(
+  entries: SftpListEntry[],
+  shouldInclude?: (entry: SftpListEntry) => Promise<boolean>
+): Promise<SftpListEntry[]> {
+  if (!shouldInclude) return entries
+
+  const filtered: SftpListEntry[] = []
+  for (const entry of entries) {
+    if (await shouldInclude(entry)) {
+      filtered.push(entry)
+    }
+  }
+  return filtered
+}
+
 function ensureDirCache(cacheKey: string, now: number): SftpDirCacheEntry {
   const existing = sftpListDirCache.get(cacheKey)
   if (existing) {
@@ -760,28 +850,37 @@ function markDirCacheComplete(cacheKey: string, now: number): void {
 async function readSftpChunk(
   session: SshLikeSession,
   handle: Buffer,
-  resolvedPath: string
+  resolvedPath: string,
+  shouldInclude?: (entry: SftpListEntry) => Promise<boolean>
 ): Promise<{ entries: SftpListEntry[]; eof: boolean }> {
   const sftp = await getSftp(session)
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      reject(new TimeoutError(`SFTP list-dir timeout after ${SFTP_LIST_DIR_TIMEOUT_MS}ms`))
-    }, SFTP_LIST_DIR_TIMEOUT_MS)
+  const result = await new Promise<{ entries: SftpListEntry[]; eof: boolean }>(
+    (resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        reject(new TimeoutError(`SFTP list-dir timeout after ${SFTP_LIST_DIR_TIMEOUT_MS}ms`))
+      }, SFTP_LIST_DIR_TIMEOUT_MS)
 
-    sftp.readdir(handle, (err, list) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      if (err) {
-        if (isSftpEof(err)) return resolve({ entries: [], eof: true })
-        return reject(err)
-      }
-      resolve({ entries: mapSftpEntries(resolvedPath, list), eof: false })
-    })
-  })
+      sftp.readdir(handle, (err, list) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (err) {
+          if (isSftpEof(err)) return resolve({ entries: [], eof: true })
+          return reject(err)
+        }
+        resolve({ entries: mapSftpEntries(resolvedPath, list), eof: false })
+      })
+    }
+  )
+
+  if (result.eof) return result
+  return {
+    entries: await filterSftpEntries(result.entries, shouldInclude),
+    eof: false
+  }
 }
 
 async function closeSftpHandle(session: SshLikeSession, handle: Buffer): Promise<void> {
@@ -809,10 +908,11 @@ async function openSftpDir(session: SshLikeSession, resolvedPath: string): Promi
 
 async function readAllSftpDirEntries(
   session: SshLikeSession,
-  resolvedPath: string
+  resolvedPath: string,
+  shouldInclude?: (entry: SftpListEntry) => Promise<boolean>
 ): Promise<SftpListEntry[]> {
   const sftp = await getSftp(session)
-  return new Promise((resolve, reject) => {
+  const entries = await new Promise<SftpListEntry[]>((resolve, reject) => {
     let settled = false
     const timer = setTimeout(() => {
       if (settled) return
@@ -828,6 +928,8 @@ async function readAllSftpDirEntries(
       resolve(mapSftpEntries(resolvedPath, list))
     })
   })
+
+  return await filterSftpEntries(entries, shouldInclude)
 }
 
 async function readFromCacheCursor(
@@ -850,7 +952,8 @@ async function readFromSftpCursor(
   cursor: Extract<SftpDirCursor, { type: 'sftp' }>,
   session: SshLikeSession,
   cacheKey: string,
-  limit: number
+  limit: number,
+  shouldInclude?: (entry: SftpListEntry) => Promise<boolean>
 ): Promise<{ entries: SftpListEntry[]; hasMore: boolean; nextCursor?: string }> {
   const max = limit > 0 ? limit : Number.MAX_SAFE_INTEGER
   const page: SftpListEntry[] = []
@@ -865,7 +968,7 @@ async function readFromSftpCursor(
         continue
       }
 
-      const chunk = await readSftpChunk(session, cursor.handle, cursor.path)
+      const chunk = await readSftpChunk(session, cursor.handle, cursor.path, shouldInclude)
       if (chunk.eof) {
         await closeSftpHandle(session, cursor.handle)
         markDirCacheComplete(cacheKey, Date.now())
@@ -1798,6 +1901,9 @@ export function registerSshHandlers(): void {
         })
         return await withFileSession(args.connectionId, async (session) => {
           const resolvedPath = await resolveSftpPath(session, args.path)
+          const gitIgnoreMatcher = await createRemoteGitIgnoreContext(session, resolvedPath)
+          const shouldIncludeEntry = async (entry: SftpListEntry): Promise<boolean> =>
+            !(await gitIgnoreMatcher.ignores(entry.path, entry.type === 'directory'))
           const now = Date.now()
           console.log('[SSH:list-dir] pruning caches', { resolvedPath })
           pruneSftpListDirCache(now)
@@ -1822,7 +1928,7 @@ export function registerSshHandlers(): void {
             cursor.lastAccess = now
             return cursor.type === 'cache'
               ? readFromCacheCursor(cursor, limit)
-              : readFromSftpCursor(cursor, session, cacheKey, limit)
+              : readFromSftpCursor(cursor, session, cacheKey, limit, shouldIncludeEntry)
           }
 
           const cached = sftpListDirCache.get(cacheKey)
@@ -1837,7 +1943,7 @@ export function registerSshHandlers(): void {
               return cached.entries
             }
             console.log('[SSH:list-dir] readAll (no limit)', { resolvedPath })
-            const entries = await readAllSftpDirEntries(session, resolvedPath)
+            const entries = await readAllSftpDirEntries(session, resolvedPath, shouldIncludeEntry)
             sftpListDirCache.set(cacheKey, {
               entries,
               complete: true,
@@ -1878,7 +1984,13 @@ export function registerSshHandlers(): void {
             pending: [],
             lastAccess: now
           }
-          const result = await readFromSftpCursor(cursor, session, cacheKey, limit)
+          const result = await readFromSftpCursor(
+            cursor,
+            session,
+            cacheKey,
+            limit,
+            shouldIncludeEntry
+          )
           console.log('[SSH:list-dir] cursor read done', {
             entries: result.entries.length,
             hasMore: result.hasMore
@@ -1954,9 +2066,21 @@ export function registerSshHandlers(): void {
   ipcMain.handle('ssh:fs:mkdir', async (_event, args: { connectionId: string; path: string }) => {
     try {
       await withFileSession(args.connectionId, async (session) => {
-        const sftp = await getSftp(session)
-        const resolvedPath = await resolveSftpPath(session, args.path)
-        await sftpMkdirRecursive(sftp, resolvedPath)
+        const inputPath = args.path.trim()
+        let resolvedPath = inputPath
+        try {
+          resolvedPath = await resolveSftpPath(session, inputPath)
+          const sftp = await getSftp(session)
+          await sftpMkdirRecursive(sftp, resolvedPath)
+          return
+        } catch (err) {
+          const shellSession = findSessionByConnection(args.connectionId)
+          if (!shellSession) throw err
+          const result = await sshExec(shellSession, `mkdir -p ${shellPathExpr(inputPath)}`, 15000)
+          if (result.exitCode !== 0) {
+            throw new Error(result.stderr.trim() || result.stdout.trim() || String(err))
+          }
+        }
       })
       return { success: true }
     } catch (err) {
@@ -2048,15 +2172,25 @@ export function registerSshHandlers(): void {
         return await withFileSession(args.connectionId, async (session) => {
           const cwdInput = args.path || '.'
           const cwd = await resolveSftpPath(session, cwdInput)
+          const gitIgnoreMatcher = await createRemoteGitIgnoreContext(session, cwd)
           const result = await sshExec(
             session,
             `find ${shellEscape(cwd)} -name ${shellEscape(args.pattern)} -maxdepth 5 2>/dev/null | head -100`
           )
           if (result.exitCode !== 0) return []
-          return result.stdout
+
+          const sftp = await getSftp(session)
+          const matches: string[] = []
+          for (const rawPath of result.stdout
             .split('\n')
-            .map((l) => l.trim())
-            .filter(Boolean)
+            .map((line) => line.trim())
+            .filter(Boolean)) {
+            const stats = await sftpStat(sftp, rawPath)
+            const isDir = stats?.isDirectory?.() ?? false
+            if (await gitIgnoreMatcher.ignores(rawPath, isDir)) continue
+            matches.push(rawPath)
+          }
+          return matches
         })
       } catch (err) {
         return { error: String(err) }
@@ -2076,6 +2210,48 @@ export function registerSshHandlers(): void {
         return await withFileSession(args.connectionId, async (session) => {
           const cwdInput = args.path || '.'
           const cwd = await resolveSftpPath(session, cwdInput)
+          const gitIgnoreMatcher = await createRemoteGitIgnoreContext(session, cwd)
+          const hasRipgrep = await checkRemoteCommandExists(session, 'rg')
+
+          if (hasRipgrep) {
+            let cmd = `cd ${shellEscape(cwd)} && rg --json --line-number --color never --no-messages --ignore-case --hidden --max-filesize 10M`
+            if (args.include) cmd += ` --glob ${shellEscape(args.include)}`
+            cmd += ` ${shellEscape(args.pattern)} . 2>/dev/null | head -200`
+
+            const result = await sshExec(session, cmd)
+            if (result.exitCode !== 0 && result.exitCode !== 1) {
+              return { error: result.stderr || 'grep failed' }
+            }
+
+            const matches: { file: string; line: number; text: string }[] = []
+            for (const rawLine of result.stdout.split('\n')) {
+              if (!rawLine.trim()) continue
+              try {
+                const parsed = JSON.parse(rawLine) as {
+                  type?: string
+                  data?: {
+                    path?: { text?: string }
+                    lines?: { text?: string }
+                    line_number?: number
+                  }
+                }
+                if (parsed.type !== 'match') continue
+                const rawPath = parsed.data?.path?.text
+                const lineNumber = parsed.data?.line_number
+                const text = parsed.data?.lines?.text ?? ''
+                if (typeof rawPath !== 'string' || typeof lineNumber !== 'number') continue
+                const fullPath = path.posix.isAbsolute(rawPath)
+                  ? rawPath
+                  : path.posix.join(cwd, rawPath)
+                if (await gitIgnoreMatcher.ignores(fullPath, false)) continue
+                matches.push({ file: fullPath, line: lineNumber, text: text.trim() })
+              } catch {
+                continue
+              }
+            }
+            return matches
+          }
+
           let cmd = `grep -rn ${shellEscape(args.pattern)} ${shellEscape(cwd)}`
           if (args.include) cmd += ` --include=${shellEscape(args.include)}`
           cmd += ' 2>/dev/null | head -100'
@@ -2088,9 +2264,9 @@ export function registerSshHandlers(): void {
           const matches: { file: string; line: number; text: string }[] = []
           for (const rawLine of result.stdout.split('\n')) {
             const match = rawLine.match(/^(.+?):(\d+):(.*)$/)
-            if (match) {
-              matches.push({ file: match[1], line: parseInt(match[2], 10), text: match[3] })
-            }
+            if (!match) continue
+            if (await gitIgnoreMatcher.ignores(match[1], false)) continue
+            matches.push({ file: match[1], line: parseInt(match[2], 10), text: match[3] })
           }
           return matches
         })
@@ -2192,6 +2368,12 @@ async function sftpMkdirRecursive(sftp: SFTPWrapper, remotePath: string): Promis
 
 function shellEscape(str: string): string {
   return "'" + str.replace(/'/g, "'\\''") + "'"
+}
+
+function shellPathExpr(str: string): string {
+  if (str === '~') return '"$HOME"'
+  if (str.startsWith('~/')) return `"$HOME"${shellEscape(str.slice(1))}`
+  return shellEscape(str)
 }
 
 async function readSshTextSnapshot(connectionId: string, filePath: string): Promise<FileSnapshot> {

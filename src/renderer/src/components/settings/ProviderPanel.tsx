@@ -17,6 +17,7 @@ import {
   Mic,
   Shapes,
   Sparkles,
+  Copy,
 } from 'lucide-react'
 import { nanoid } from 'nanoid'
 import { toast } from 'sonner'
@@ -64,6 +65,8 @@ import type {
   ModelCategory,
 } from '@renderer/lib/api/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
+import { ipcStreamRequest } from '@renderer/lib/ipc/api-stream'
+import { loadPrompt } from '@renderer/lib/prompts/prompt-loader'
 import { ProviderIcon, ModelIcon } from './provider-icons'
 
 const MODEL_ICON_OPTIONS = [
@@ -529,6 +532,8 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
   const [modelSearch, setModelSearch] = useState('')
   const [editingThinkingModel, setEditingThinkingModel] = useState<AIModelConfig | null>(null)
   const [testModelId, setTestModelId] = useState(provider.models.find((m) => m.enabled)?.id ?? provider.models[0]?.id ?? '')
+  const [oauthLoginTab, setOauthLoginTab] = useState<'connect' | 'manual'>('connect')
+  const [fetchingQuota, setFetchingQuota] = useState(false)
   const builtinPreset = useMemo(
     () => (provider.builtinId ? builtinProviderPresets.find((p) => p.builtinId === provider.builtinId) : undefined),
     [provider.builtinId]
@@ -836,6 +841,95 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
     toast.success(t('provider.channelDisconnected'))
   }
 
+  const handleFetchQuota = async (): Promise<void> => {
+    if (!isCodexProvider) return
+    setFetchingQuota(true)
+    try {
+      const activeProvider = await ensureAuthForRequest()
+      if (!activeProvider) return
+      const model = activeProvider.models.find((m) => m.enabled)?.id ?? activeProvider.models[0]?.id ?? 'gpt-5.1-codex'
+      const baseUrl = normalizeProviderBaseUrl(
+        activeProvider.baseUrl?.trim() || 'https://chatgpt.com/backend-api/codex',
+        'openai-responses'
+      )
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (activeProvider.oauth?.accessToken) {
+        headers['Authorization'] = `Bearer ${activeProvider.oauth.accessToken}`
+      }
+      if (activeProvider.userAgent) headers['User-Agent'] = activeProvider.userAgent
+      const overrides = activeProvider.requestOverrides?.headers
+      if (overrides) {
+        const sid = `quota-${Date.now()}`
+        for (const [key, raw] of Object.entries(overrides)) {
+          const val = String(raw).replace(/\{\{\s*sessionId\s*\}\}/g, sid).replace(/\{\{\s*model\s*\}\}/g, model).trim()
+          if (val) headers[key] = val
+        }
+      }
+      const url = `${baseUrl}/responses`
+      const bodyObj: Record<string, unknown> = {
+        model,
+        input: [{ type: 'message', role: 'user', content: 'Hi' }],
+        stream: true,
+        ...(activeProvider.requestOverrides?.body ?? {}),
+      }
+      const promptName = activeProvider.instructionsPrompt ?? 'codex-instructions'
+      const instructions = await loadPrompt(promptName)
+      if (instructions) bodyObj.instructions = instructions
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 15000)
+      try {
+        for await (const ev of ipcStreamRequest({
+          url,
+          method: 'POST',
+          headers,
+          body: JSON.stringify(bodyObj),
+          signal: controller.signal,
+          useSystemProxy: activeProvider.useSystemProxy,
+          providerId: activeProvider.id,
+          providerBuiltinId: activeProvider.builtinId,
+        })) {
+          if (ev.data) {
+            setTimeout(() => controller.abort(), 500)
+            break
+          }
+        }
+        toast.success(t('provider.quotaFetched'))
+      } finally {
+        clearTimeout(timeout)
+      }
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        toast.success(t('provider.quotaFetched'))
+      } else {
+        toast.error(t('provider.quotaFetchFailed'), {
+          description: err instanceof Error ? err.message : String(err),
+        })
+      }
+    } finally {
+      setFetchingQuota(false)
+    }
+  }
+
+  const handleCopyAccountJson = async (): Promise<void> => {
+    let payload: Record<string, string>
+    if (isOAuthAuth && provider.oauth?.accessToken) {
+      payload = { access_token: provider.oauth.accessToken }
+      if (provider.oauth.refreshToken) payload.refresh_token = provider.oauth.refreshToken
+      if (provider.oauth.expiresAt) payload.expires_at = new Date(provider.oauth.expiresAt).toISOString()
+    } else if (isChannelAuth && provider.channel?.accessToken) {
+      payload = { access_token: provider.channel.accessToken }
+    } else {
+      toast.error(t('provider.copyAccountJsonNoToken'))
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+      toast.success(t('provider.copyAccountJsonSuccess'))
+    } catch {
+      toast.error(t('provider.copyAccountJsonFailed'))
+    }
+  }
+
   const handleTestConnection = async (): Promise<void> => {
     setTesting(true)
     try {
@@ -862,7 +956,13 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
       } else if (isResponses) {
         url = `${baseUrl}/responses`
         if (activeProvider.apiKey) headers['Authorization'] = `Bearer ${activeProvider.apiKey}`
-        body = JSON.stringify({ model, input: [{ type: 'message', role: 'user', content: 'Hi' }], stream: true })
+        const bodyObj: Record<string, unknown> = { model, input: [{ type: 'message', role: 'user', content: 'Hi' }], stream: true }
+        if (activeProvider.builtinId === 'codex-oauth') {
+          const promptName = activeProvider.instructionsPrompt ?? 'codex-instructions'
+          const instructions = await loadPrompt(promptName)
+          if (instructions) bodyObj.instructions = instructions
+        }
+        body = JSON.stringify(bodyObj)
       } else {
         url = `${baseUrl}/chat/completions`
         if (activeProvider.apiKey) headers['Authorization'] = `Bearer ${activeProvider.apiKey}`
@@ -1004,17 +1104,50 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
 
         {isOAuthAuth && (
           <section className="space-y-2">
+            {isCodexProvider && (
+              <div className="flex gap-1 p-0.5 rounded-md bg-muted/50 w-fit">
+                <button
+                  type="button"
+                  onClick={() => setOauthLoginTab('connect')}
+                  className={`px-2.5 py-1 text-xs rounded transition-colors ${oauthLoginTab === 'connect' ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  {t('provider.oauthTabConnect')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOauthLoginTab('manual')}
+                  className={`px-2.5 py-1 text-xs rounded transition-colors ${oauthLoginTab === 'manual' ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  {t('provider.oauthTabManual')}
+                </button>
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <label className="text-sm font-medium">{t('provider.oauthLogin')}</label>
-              <span className={`text-xs ${provider.oauth?.accessToken ? 'text-emerald-600' : 'text-muted-foreground'}`}>
-                {provider.oauth?.accessToken ? t('provider.oauthConnected') : t('provider.oauthNotConnected')}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs ${provider.oauth?.accessToken ? 'text-emerald-600' : 'text-muted-foreground'}`}>
+                  {provider.oauth?.accessToken ? t('provider.oauthConnected') : t('provider.oauthNotConnected')}
+                </span>
+                {provider.oauth?.accessToken && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 gap-1 px-1.5 text-[11px]"
+                    onClick={() => void handleCopyAccountJson()}
+                  >
+                    <Copy className="size-3" />
+                    {t('provider.copyAccountJson')}
+                  </Button>
+                )}
+              </div>
             </div>
             {provider.oauth?.accountId && (
               <p className="text-[11px] text-muted-foreground">
                 {t('provider.oauthAccount', { account: provider.oauth.accountId })}
               </p>
             )}
+            {(!isCodexProvider || oauthLoginTab === 'connect') && (
+            <>
             <div className="flex flex-wrap items-center gap-2">
               {!provider.oauth?.accessToken && (
                 <>
@@ -1065,10 +1198,12 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
             {!hideOAuthSettings && !oauthConfigReady && (
               <p className="text-[11px] text-muted-foreground">{t('provider.oauthConfigMissing')}</p>
             )}
+            </>
+            )}
           </section>
         )}
 
-        {isOAuthAuth && isCodexProvider && (
+        {isOAuthAuth && isCodexProvider && oauthLoginTab === 'manual' && (
           <section className="space-y-2">
             <label className="text-sm font-medium">{t('provider.oauthManualTitle')}</label>
             <p className="text-[11px] text-muted-foreground">{t('provider.oauthManualDesc')}</p>
@@ -1111,7 +1246,19 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
 
         {isOAuthAuth && isCodexProvider && (
           <section className="space-y-2">
-            <label className="text-sm font-medium">{t('provider.codexQuotaTitle')}</label>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">{t('provider.codexQuotaTitle')}</label>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 text-xs"
+                disabled={!authReadyForUi || fetchingQuota}
+                onClick={() => void handleFetchQuota()}
+              >
+                {fetchingQuota ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                {fetchingQuota ? t('provider.fetchingQuota') : t('provider.fetchQuota')}
+              </Button>
+            </div>
             {codexQuota ? (
               <div className="rounded-md border bg-muted/30 p-2 text-[11px] space-y-1">
                 <div className="flex items-center justify-between">
@@ -1230,9 +1377,22 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
           <section className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-sm font-medium">{t('provider.channelLogin')}</label>
-              <span className={`text-xs ${provider.channel?.accessToken ? 'text-emerald-600' : 'text-muted-foreground'}`}>
-                {provider.channel?.accessToken ? t('provider.channelConnected') : t('provider.channelNotConnected')}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs ${provider.channel?.accessToken ? 'text-emerald-600' : 'text-muted-foreground'}`}>
+                  {provider.channel?.accessToken ? t('provider.channelConnected') : t('provider.channelNotConnected')}
+                </span>
+                {provider.channel?.accessToken && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 gap-1 px-1.5 text-[11px]"
+                    onClick={() => void handleCopyAccountJson()}
+                  >
+                    <Copy className="size-3" />
+                    {t('provider.copyAccountJson')}
+                  </Button>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

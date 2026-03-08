@@ -26,6 +26,7 @@ import { useUIStore, type AppMode } from '@renderer/stores/ui-store'
 import { formatTokens } from '@renderer/lib/format-tokens'
 import { useDebouncedTokens } from '@renderer/hooks/use-estimated-tokens'
 import { useChatStore } from '@renderer/stores/chat-store'
+import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from 'react-i18next'
 import {
   ACCEPTED_IMAGE_TYPES,
@@ -78,10 +79,14 @@ function ContextRing(): React.JSX.Element | null {
   const ctxLimit = activeModelCfg?.contextLength ?? null
 
   const lastUsage = useChatStore((s) => {
-    const session = s.sessions.find((sess) => sess.id === s.activeSessionId)
-    if (!session) return null
-    const msgs = [...session.messages].reverse()
-    return msgs.find((m) => m.usage)?.usage ?? null
+    const activeSession = s.sessions.find((sess) => sess.id === s.activeSessionId)
+    if (!activeSession) return null
+    const messages = activeSession.messages
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const usage = messages[index]?.usage
+      if (usage) return usage
+    }
+    return null
   })
 
   const ctxUsed = lastUsage?.contextTokens ?? lastUsage?.inputTokens ?? 0
@@ -358,7 +363,16 @@ export function InputArea({
   }, [])
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen)
   const mode = useUIStore((s) => s.mode)
-  const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const { activeSessionId, hasMessages, clearSessionMessages } = useChatStore(
+    useShallow((s) => {
+      const activeSession = s.sessions.find((sess) => sess.id === s.activeSessionId)
+      return {
+        activeSessionId: s.activeSessionId,
+        hasMessages: (activeSession?.messageCount ?? 0) > 0,
+        clearSessionMessages: s.clearSessionMessages
+      }
+    })
+  )
   const queuedMessagesSnapshotRef = React.useRef<PendingSessionMessageItem[]>(EMPTY_QUEUED_MESSAGES)
   const getQueuedMessagesSnapshot = React.useCallback(() => {
     const next = activeSessionId
@@ -551,11 +565,6 @@ export function InputArea({
       restoreDraftFromHistory
     ]
   )
-  const hasMessages = useChatStore((s) => {
-    const session = s.sessions.find((sess) => sess.id === s.activeSessionId)
-    return (session?.messageCount ?? 0) > 0
-  })
-  const clearSessionMessages = useChatStore((s) => s.clearSessionMessages)
   const hasApiKey = !!activeProvider?.apiKey || activeProvider?.requiresApiKey === false
   const needsWorkingFolder = mode !== 'chat' && !workingFolder
   const planMode = useUIStore((s) => s.planMode)

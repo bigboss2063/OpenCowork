@@ -1,6 +1,18 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
-import { FileText, FilePen, CheckCircle2, XCircle, Copy, Check, Eye, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
+import {
+  FileText,
+  FilePen,
+  CheckCircle2,
+  XCircle,
+  Copy,
+  Check,
+  Eye,
+  Trash2,
+  ChevronDown,
+  ChevronUp
+} from 'lucide-react'
 import { Badge } from '@renderer/components/ui/badge'
 import { Separator } from '@renderer/components/ui/separator'
 import { useAgentStore } from '@renderer/stores/agent-store'
@@ -12,7 +24,23 @@ import { cn } from '@renderer/lib/utils'
 const FILE_TOOLS = new Set(['Write', 'Edit'])
 const DELETE_TOOLS = new Set(['Delete'])
 
-const PREVIEWABLE_EXTENSIONS = new Set(['.html', '.htm', '.md', '.mdx', '.markdown', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico', '.docx', '.pdf'])
+const PREVIEWABLE_EXTENSIONS = new Set([
+  '.html',
+  '.htm',
+  '.md',
+  '.mdx',
+  '.markdown',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.bmp',
+  '.webp',
+  '.svg',
+  '.ico',
+  '.docx',
+  '.pdf'
+])
 const SPREADSHEET_EXTENSIONS = new Set(['.csv', '.tsv', '.xls', '.xlsx'])
 
 function getFileExtension(filePath: string): string {
@@ -22,12 +50,47 @@ function getFileExtension(filePath: string): string {
 
 export function ArtifactsPanel(): React.JSX.Element {
   const { t } = useTranslation('cowork')
-  const executedToolCalls = useAgentStore((s) => s.executedToolCalls)
+  const { fileOpIdsSig, deleteOpIdsSig } = useAgentStore(
+    useShallow((s) => ({
+      fileOpIdsSig: s.executedToolCalls
+        .filter((toolCall) => FILE_TOOLS.has(toolCall.name))
+        .map((toolCall) => toolCall.id)
+        .join('\u0000'),
+      deleteOpIdsSig: s.executedToolCalls
+        .filter((toolCall) => DELETE_TOOLS.has(toolCall.name))
+        .map((toolCall) => toolCall.id)
+        .join('\u0000')
+    }))
+  )
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [loadingContent, setLoadingContent] = useState(false)
   const [showPreview, setShowPreview] = useState(true)
+  const fileOps = fileOpIdsSig
+    ? fileOpIdsSig.split('\u0000').reduce(
+        (list, id) => {
+          const toolCall = useAgentStore
+            .getState()
+            .executedToolCalls.find((entry) => entry.id === id)
+          if (toolCall) list.push(toolCall)
+          return list
+        },
+        [] as ReturnType<typeof useAgentStore.getState>['executedToolCalls']
+      )
+    : []
+  const deleteOps = deleteOpIdsSig
+    ? deleteOpIdsSig.split('\u0000').reduce(
+        (list, id) => {
+          const toolCall = useAgentStore
+            .getState()
+            .executedToolCalls.find((entry) => entry.id === id)
+          if (toolCall) list.push(toolCall)
+          return list
+        },
+        [] as ReturnType<typeof useAgentStore.getState>['executedToolCalls']
+      )
+    : []
 
   const handleCopyPath = useCallback((id: string, path: string) => {
     navigator.clipboard.writeText(path)
@@ -43,9 +106,6 @@ export function ArtifactsPanel(): React.JSX.Element {
   const handleSelectFile = useCallback((path: string) => {
     setSelectedFilePath(path)
   }, [])
-
-  const fileOps = executedToolCalls.filter((tc) => FILE_TOOLS.has(tc.name))
-  const deleteOps = executedToolCalls.filter((tc) => DELETE_TOOLS.has(tc.name))
 
   // Auto-select the most recent file
   useEffect(() => {
@@ -86,15 +146,13 @@ export function ArtifactsPanel(): React.JSX.Element {
       <div className="flex flex-col items-center justify-center py-12 text-center">
         <FileText className="mb-3 size-8 text-muted-foreground/40" />
         <p className="text-sm text-muted-foreground">{t('artifacts.noArtifacts')}</p>
-        <p className="mt-1 text-xs text-muted-foreground/60">
-          {t('artifacts.noArtifactsDesc')}
-        </p>
+        <p className="mt-1 text-xs text-muted-foreground/60">{t('artifacts.noArtifactsDesc')}</p>
       </div>
     )
   }
 
   // Deduplicate by file path, keeping latest operation + count
-  const fileMap = new Map<string, { tc: typeof fileOps[0]; count: number; ops: Set<string> }>()
+  const fileMap = new Map<string, { tc: (typeof fileOps)[0]; count: number; ops: Set<string> }>()
   for (const tc of fileOps) {
     const fp = String(tc.input.file_path ?? tc.input.path ?? '')
     const existing = fileMap.get(fp)
@@ -119,13 +177,17 @@ export function ArtifactsPanel(): React.JSX.Element {
             {uniqueFiles.filter((f) => f.ops.has('Write')).length > 0 && (
               <Badge variant="secondary" className="text-[10px] gap-0.5">
                 <FileText className="size-2.5" />
-                {t('artifacts.new', { count: uniqueFiles.filter((f) => f.ops.has('Write')).length })}
+                {t('artifacts.new', {
+                  count: uniqueFiles.filter((f) => f.ops.has('Write')).length
+                })}
               </Badge>
             )}
             {uniqueFiles.filter((f) => !f.ops.has('Write')).length > 0 && (
               <Badge variant="secondary" className="text-[10px] gap-0.5">
                 <FilePen className="size-2.5" />
-                {t('artifacts.edited', { count: uniqueFiles.filter((f) => !f.ops.has('Write')).length })}
+                {t('artifacts.edited', {
+                  count: uniqueFiles.filter((f) => !f.ops.has('Write')).length
+                })}
               </Badge>
             )}
           </div>
@@ -144,8 +206,8 @@ export function ArtifactsPanel(): React.JSX.Element {
               <button
                 key={tc.id}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors group",
-                  isSelected ? "bg-muted" : "hover:bg-muted/50"
+                  'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors group',
+                  isSelected ? 'bg-muted' : 'hover:bg-muted/50'
                 )}
                 onClick={() => handleSelectFile(filePath)}
                 title={filePath}
@@ -159,7 +221,9 @@ export function ArtifactsPanel(): React.JSX.Element {
                   <div className="truncate font-medium text-xs">{fileName}</div>
                   <div className="flex items-center gap-1 text-[10px] text-muted-foreground/50">
                     <span className="truncate">{filePath}</span>
-                    {count > 1 && <span className="shrink-0 text-muted-foreground/30">{count}×</span>}
+                    {count > 1 && (
+                      <span className="shrink-0 text-muted-foreground/30">{count}×</span>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
@@ -216,7 +280,11 @@ export function ArtifactsPanel(): React.JSX.Element {
                 className="text-muted-foreground hover:text-foreground transition-colors"
                 onClick={() => setShowPreview(!showPreview)}
               >
-                {showPreview ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                {showPreview ? (
+                  <ChevronUp className="size-3.5" />
+                ) : (
+                  <ChevronDown className="size-3.5" />
+                )}
               </button>
             </div>
             {showPreview && (
@@ -267,7 +335,9 @@ export function ArtifactsPanel(): React.JSX.Element {
                   >
                     <Trash2 className="size-3.5 shrink-0 text-destructive/70" />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium text-xs line-through text-muted-foreground">{fileName}</div>
+                      <div className="truncate font-medium text-xs line-through text-muted-foreground">
+                        {fileName}
+                      </div>
                       <div className="truncate text-[10px] text-muted-foreground/50">{fp}</div>
                     </div>
                     {copiedId === tc.id ? (

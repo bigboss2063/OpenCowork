@@ -24,6 +24,7 @@ const MAX_IMAGE_BASE64_CHARS = 4_096
 const MAX_BACKGROUND_PROCESS_OUTPUT_CHARS = 20_000
 const MAX_BACKGROUND_PROCESS_ENTRIES = 120
 const MAX_RUN_CHANGESETS = 120
+const BACKGROUND_PROCESS_OUTPUT_FLUSH_MS = 80
 
 function truncateText(value: string, max: number): string {
   if (value.length <= max) return value
@@ -164,6 +165,24 @@ function trimSubAgentHistory(history: SubAgentState[]): void {
   history.splice(0, history.length - MAX_SUBAGENT_HISTORY)
 }
 
+function rebuildRunningSubAgentDerived(state: {
+  activeSubAgents: Record<string, SubAgentState>
+  runningSubAgentNamesSig: string
+  runningSubAgentSessionIdsSig: string
+}): void {
+  const runningNames: string[] = []
+  const runningSessionIds = new Set<string>()
+
+  for (const subAgent of Object.values(state.activeSubAgents)) {
+    if (!subAgent.isRunning) continue
+    runningNames.push(subAgent.name)
+    if (subAgent.sessionId) runningSessionIds.add(subAgent.sessionId)
+  }
+
+  state.runningSubAgentNamesSig = runningNames.join('\u0000')
+  state.runningSubAgentSessionIdsSig = Array.from(runningSessionIds).sort().join('\u0000')
+}
+
 export interface BackgroundProcessState {
   id: string
   command: string
@@ -210,6 +229,20 @@ interface ProcessOutputEvent {
   }
 }
 
+interface BufferedProcessOutputEvent {
+  id: string
+  data: string
+  port?: number
+  exited?: boolean
+  exitCode?: number | null
+  metadata?: {
+    source?: string
+    sessionId?: string
+    toolUseId?: string
+    description?: string
+  }
+}
+
 function appendBackgroundOutput(existing: string, chunk: string): string {
   const next = `${existing}${chunk}`
   if (next.length <= MAX_BACKGROUND_PROCESS_OUTPUT_CHARS) return next
@@ -223,6 +256,48 @@ function trimBackgroundProcessMap(map: Record<string, BackgroundProcessState>): 
   for (let i = 0; i < removeCount; i++) {
     delete map[entries[i][0]]
   }
+}
+
+function applyProcessOutputEvent(
+  existing: BackgroundProcessState | undefined,
+  payload: BufferedProcessOutputEvent,
+  now: number
+): BackgroundProcessState {
+  const next: BackgroundProcessState = existing
+    ? { ...existing }
+    : {
+        id: payload.id,
+        command: '',
+        cwd: undefined,
+        sessionId: payload.metadata?.sessionId,
+        toolUseId: payload.metadata?.toolUseId,
+        description: payload.metadata?.description,
+        source: payload.metadata?.source,
+        status: payload.exited ? 'exited' : 'running',
+        output: '',
+        port: payload.port,
+        exitCode: payload.exitCode,
+        createdAt: now,
+        updatedAt: now
+      }
+
+  if (payload.data) {
+    next.output = appendBackgroundOutput(next.output, payload.data)
+  }
+  if (payload.port) next.port = payload.port
+  if (payload.metadata) {
+    next.sessionId = payload.metadata.sessionId ?? next.sessionId
+    next.toolUseId = payload.metadata.toolUseId ?? next.toolUseId
+    next.description = payload.metadata.description ?? next.description
+    next.source = payload.metadata.source ?? next.source
+  }
+  if (payload.exited) {
+    next.status = next.status === 'stopped' ? 'stopped' : 'exited'
+    next.exitCode = payload.exitCode
+  }
+  next.updatedAt = now
+
+  return next
 }
 
 export type { SubAgentState }
@@ -296,6 +371,10 @@ interface AgentStore {
   completedSubAgents: Record<string, SubAgentState>
   /** Historical SubAgent records — persisted across agent runs */
   subAgentHistory: SubAgentState[]
+  /** Derived signature of currently running SubAgent names */
+  runningSubAgentNamesSig: string
+  /** Derived signature of session IDs that currently have running SubAgents */
+  runningSubAgentSessionIdsSig: string
 
   /** Tool names approved by user during this session — auto-approve on repeat */
   approvedToolNames: string[]
@@ -366,6 +445,8 @@ export const useAgentStore = create<AgentStore>()(
       activeSubAgents: {},
       completedSubAgents: {},
       subAgentHistory: [],
+      runningSubAgentNamesSig: '',
+      runningSubAgentSessionIdsSig: '',
       approvedToolNames: [],
       backgroundProcesses: {},
       foregroundShellExecByToolUseId: {},
@@ -540,47 +621,60 @@ export const useAgentStore = create<AgentStore>()(
           console.error('[AgentStore] Failed to load process list:', err)
         }
 
+        const bufferedProcessOutputs = new Map<string, BufferedProcessOutputEvent>()
+        let bufferedProcessOutputTimer: ReturnType<typeof setTimeout> | null = null
+
+        const flushBufferedProcessOutputs = (): void => {
+          if (bufferedProcessOutputTimer) {
+            clearTimeout(bufferedProcessOutputTimer)
+            bufferedProcessOutputTimer = null
+          }
+          if (bufferedProcessOutputs.size === 0) return
+
+          const pending = Array.from(bufferedProcessOutputs.values())
+          bufferedProcessOutputs.clear()
+          set((state) => {
+            const now = Date.now()
+            for (const payload of pending) {
+              state.backgroundProcesses[payload.id] = applyProcessOutputEvent(
+                state.backgroundProcesses[payload.id],
+                payload,
+                now
+              )
+            }
+            trimBackgroundProcessMap(state.backgroundProcesses)
+          })
+        }
+
+        const scheduleBufferedProcessOutputFlush = (): void => {
+          if (bufferedProcessOutputTimer) return
+          bufferedProcessOutputTimer = setTimeout(() => {
+            flushBufferedProcessOutputs()
+          }, BACKGROUND_PROCESS_OUTPUT_FLUSH_MS)
+        }
+
         ipcClient.on(IPC.PROCESS_OUTPUT, (...args: unknown[]) => {
           const payload = args[0] as ProcessOutputEvent | undefined
           if (!payload?.id) return
-          set((state) => {
-            const existing = state.backgroundProcesses[payload.id]
-            const now = Date.now()
-            const next: BackgroundProcessState = existing
-              ? { ...existing }
-              : {
-                  id: payload.id,
-                  command: '',
-                  cwd: undefined,
-                  sessionId: payload.metadata?.sessionId,
-                  toolUseId: payload.metadata?.toolUseId,
-                  description: payload.metadata?.description,
-                  source: payload.metadata?.source,
-                  status: payload.exited ? 'exited' : 'running',
-                  output: '',
-                  port: payload.port,
-                  exitCode: payload.exitCode,
-                  createdAt: now,
-                  updatedAt: now
-                }
-            if (payload.data) {
-              next.output = appendBackgroundOutput(next.output, payload.data)
-            }
-            if (payload.port) next.port = payload.port
-            if (payload.metadata) {
-              next.sessionId = payload.metadata.sessionId ?? next.sessionId
-              next.toolUseId = payload.metadata.toolUseId ?? next.toolUseId
-              next.description = payload.metadata.description ?? next.description
-              next.source = payload.metadata.source ?? next.source
-            }
-            if (payload.exited) {
-              next.status = next.status === 'stopped' ? 'stopped' : 'exited'
-              next.exitCode = payload.exitCode
-            }
-            next.updatedAt = now
-            state.backgroundProcesses[payload.id] = next
-            trimBackgroundProcessMap(state.backgroundProcesses)
+
+          const existing = bufferedProcessOutputs.get(payload.id)
+          bufferedProcessOutputs.set(payload.id, {
+            id: payload.id,
+            data: `${existing?.data ?? ''}${payload.data ?? ''}`,
+            port: payload.port ?? existing?.port,
+            exited: payload.exited ?? existing?.exited,
+            exitCode: payload.exitCode ?? existing?.exitCode,
+            metadata: payload.metadata
+              ? { ...(existing?.metadata ?? {}), ...payload.metadata }
+              : existing?.metadata
           })
+
+          if (payload.exited) {
+            flushBufferedProcessOutputs()
+            return
+          }
+
+          scheduleBufferedProcessOutputFlush()
         })
       },
 
@@ -681,6 +775,8 @@ export const useAgentStore = create<AgentStore>()(
           state.executedToolCalls = []
           state.activeSubAgents = {}
           state.completedSubAgents = {}
+          state.runningSubAgentNamesSig = ''
+          state.runningSubAgentSessionIdsSig = ''
           state.approvedToolNames = []
           state.foregroundShellExecByToolUseId = {}
         })
@@ -807,6 +903,7 @@ export const useAgentStore = create<AgentStore>()(
                 startedAt: Date.now(),
                 completedAt: null
               }
+              rebuildRunningSubAgentDerived(state)
               break
             case 'sub_agent_iteration': {
               const sa = state.activeSubAgents[id]
@@ -847,6 +944,7 @@ export const useAgentStore = create<AgentStore>()(
                 state.completedSubAgents[id] = sa
                 trimCompletedSubAgentsMap(state.completedSubAgents)
                 delete state.activeSubAgents[id]
+                rebuildRunningSubAgentDerived(state)
               }
               break
             }
@@ -875,6 +973,7 @@ export const useAgentStore = create<AgentStore>()(
           for (const [key, sa] of Object.entries(state.activeSubAgents)) {
             if (sa.sessionId === sessionId) delete state.activeSubAgents[key]
           }
+          rebuildRunningSubAgentDerived(state)
           // Remove completed subagents belonging to the session
           for (const [key, sa] of Object.entries(state.completedSubAgents)) {
             if (sa.sessionId === sessionId) delete state.completedSubAgents[key]

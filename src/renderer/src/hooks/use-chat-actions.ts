@@ -15,6 +15,7 @@ import {
   resolvePromptEnvironmentContext
 } from '@renderer/lib/agent/system-prompt'
 import { subAgentEvents } from '@renderer/lib/agent/sub-agents/events'
+import type { SubAgentEvent } from '@renderer/lib/agent/sub-agents/types'
 import { abortAllTeammates } from '@renderer/lib/agent/teams/teammate-runner'
 import { TEAM_TOOL_NAMES } from '@renderer/lib/agent/teams/register'
 import { teamEvents } from '@renderer/lib/agent/teams/events'
@@ -456,6 +457,9 @@ export function abortSession(sessionId: string): void {
 // 60fps flush causes expensive markdown + layout work during panel resizing.
 // 33ms keeps streaming smooth while lowering render/reflow pressure.
 const STREAM_DELTA_FLUSH_MS = 33
+// SubAgent text can arrive from multiple inner loops at high frequency.
+// Buffering it separately avoids waking large parts of the UI on every tiny delta.
+const SUB_AGENT_TEXT_FLUSH_MS = 66
 
 interface StreamDeltaBuffer {
   pushThinking: (chunk: string) => void
@@ -531,6 +535,79 @@ function createStreamDeltaBuffer(sessionId: string, assistantMsgId: string): Str
       thinkingBuffer = ''
       textBuffer = ''
       toolInputBuffer.clear()
+    }
+  }
+}
+
+function createSubAgentEventBuffer(sessionId: string): {
+  handleEvent: (event: SubAgentEvent) => void
+  dispose: () => void
+} {
+  const textBuffers = new Map<
+    string,
+    {
+      subAgentName: string
+      text: string
+      timer?: ReturnType<typeof setTimeout>
+    }
+  >()
+
+  const flushText = (toolUseId: string): void => {
+    const entry = textBuffers.get(toolUseId)
+    if (!entry) return
+    if (entry.timer) {
+      clearTimeout(entry.timer)
+      entry.timer = undefined
+    }
+    if (!entry.text) return
+    useAgentStore.getState().handleSubAgentEvent(
+      {
+        type: 'sub_agent_text_delta',
+        subAgentName: entry.subAgentName,
+        toolUseId,
+        text: entry.text
+      },
+      sessionId
+    )
+    entry.text = ''
+  }
+
+  const flushAll = (): void => {
+    for (const toolUseId of textBuffers.keys()) {
+      flushText(toolUseId)
+    }
+  }
+
+  return {
+    handleEvent: (event) => {
+      if (event.type === 'sub_agent_text_delta') {
+        const entry = textBuffers.get(event.toolUseId) ?? {
+          subAgentName: event.subAgentName,
+          text: ''
+        }
+        entry.subAgentName = event.subAgentName
+        entry.text += event.text
+        textBuffers.set(event.toolUseId, entry)
+        if (!entry.timer) {
+          entry.timer = setTimeout(() => {
+            flushText(event.toolUseId)
+          }, SUB_AGENT_TEXT_FLUSH_MS)
+        }
+        return
+      }
+
+      if (event.type === 'sub_agent_end') {
+        flushText(event.toolUseId)
+      }
+
+      useAgentStore.getState().handleSubAgentEvent(event, sessionId)
+    },
+    dispose: () => {
+      flushAll()
+      for (const entry of textBuffers.values()) {
+        if (entry.timer) clearTimeout(entry.timer)
+      }
+      textBuffers.clear()
     }
   }
 }
@@ -1124,8 +1201,9 @@ export function useChatActions(): {
         const loopStartedAt = Date.now()
 
         // Subscribe to SubAgent events during agent loop
+        const subAgentEventBuffer = createSubAgentEventBuffer(sessionId!)
         const unsubSubAgent = subAgentEvents.on((event) => {
-          useAgentStore.getState().handleSubAgentEvent(event, sessionId!)
+          subAgentEventBuffer.handleEvent(event)
           // Accumulate SubAgent token usage into the parent message
           if (event.type === 'sub_agent_end' && event.result?.usage) {
             mergeUsage(accumulatedUsage, event.result.usage)
@@ -1158,6 +1236,7 @@ export function useChatActions(): {
             lastFlush: number
             pending?: Record<string, unknown>
             timer?: ReturnType<typeof setTimeout>
+            lastSent?: string
           }
         >()
         const chatToolInputThrottle = new Map<
@@ -1279,7 +1358,13 @@ export function useChatActions(): {
           const flushToolInput = (toolCallId: string): void => {
             const entry = toolInputThrottle.get(toolCallId)
             if (!entry?.pending) return
+            const snapshot = JSON.stringify(entry.pending)
+            if (snapshot === entry.lastSent) {
+              entry.pending = undefined
+              return
+            }
             entry.lastFlush = Date.now()
+            entry.lastSent = snapshot
             const pending = entry.pending
             entry.pending = undefined
             useAgentStore.getState().updateToolCall(toolCallId, { input: pending })
@@ -1619,6 +1704,7 @@ export function useChatActions(): {
             }
           }
           unsubSubAgent()
+          subAgentEventBuffer.dispose()
           agentStore.setSessionStatus(sessionId, 'completed')
           chatStore.setStreamingMessageId(sessionId, null)
           sessionAbortControllers.delete(sessionId)

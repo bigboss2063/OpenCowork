@@ -10,6 +10,8 @@ import { usePlanStore } from '@renderer/stores/plan-store'
 import { cn } from '@renderer/lib/utils'
 import type { TeamTask } from '@renderer/lib/agent/teams/types'
 
+const EMPTY_TEAM_TASKS: TeamTask[] = []
+
 function TaskStatusIcon({ status }: { status: TaskItem['status'] }): React.JSX.Element {
   switch (status) {
     case 'completed':
@@ -25,10 +27,12 @@ function TaskStatusIcon({ status }: { status: TaskItem['status'] }): React.JSX.E
 export function StepsPanel(): React.JSX.Element {
   const { t } = useTranslation('cowork')
   const todos = useTaskStore((s) => s.tasks)
-  const activeTeam = useTeamStore((s) => s.activeTeam)
-  const teamTasks = activeTeam?.tasks ?? []
+  const teamName = useTeamStore((s) => s.activeTeam?.name ?? 'Team')
+  const teamTasks = useTeamStore((s) => s.activeTeam?.tasks ?? EMPTY_TEAM_TASKS)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
-  const isRunning = useAgentStore((s) => activeSessionId ? s.runningSessions[activeSessionId] === 'running' : false)
+  const isRunning = useAgentStore((s) =>
+    activeSessionId ? s.runningSessions[activeSessionId] === 'running' : false
+  )
 
   const plan = usePlanStore((s) => {
     if (!activeSessionId) return undefined
@@ -44,7 +48,7 @@ export function StepsPanel(): React.JSX.Element {
   const progress = {
     total,
     completed,
-    percentage: total === 0 ? 0 : Math.round((completed / total) * 100),
+    percentage: total === 0 ? 0 : Math.round((completed / total) * 100)
   }
 
   const hasContent = todos.length > 0 || teamTasks.length > 0
@@ -54,9 +58,7 @@ export function StepsPanel(): React.JSX.Element {
       <div className="flex flex-col items-center justify-center py-12 text-center">
         <Circle className="mb-3 size-8 text-muted-foreground/40" />
         <p className="text-sm text-muted-foreground">{t('steps.noTasks')}</p>
-        <p className="mt-1 text-xs text-muted-foreground/60">
-          {t('steps.noTasksDesc')}
-        </p>
+        <p className="mt-1 text-xs text-muted-foreground/60">{t('steps.noTasksDesc')}</p>
       </div>
     )
   }
@@ -77,7 +79,11 @@ export function StepsPanel(): React.JSX.Element {
               {completed}/{total}
             </Badge>
           </div>
-          <TodoList todos={planTasks} progress={progress} isRunning={isRunning && teamTasks.length === 0} />
+          <TodoList
+            todos={planTasks}
+            progress={progress}
+            isRunning={isRunning && teamTasks.length === 0}
+          />
         </div>
       )}
 
@@ -85,26 +91,38 @@ export function StepsPanel(): React.JSX.Element {
       {standaloneTasks.length > 0 && (
         <>
           {plan && planTasks.length > 0 && <Separator />}
-          <TodoList todos={standaloneTasks} progress={{
-            total: standaloneTasks.length,
-            completed: standaloneTasks.filter((t) => t.status === 'completed').length,
-            percentage: standaloneTasks.length === 0 ? 0 : Math.round((standaloneTasks.filter((t) => t.status === 'completed').length / standaloneTasks.length) * 100),
-          }} isRunning={isRunning && teamTasks.length === 0} />
+          <TodoList
+            todos={standaloneTasks}
+            progress={{
+              total: standaloneTasks.length,
+              completed: standaloneTasks.filter((t) => t.status === 'completed').length,
+              percentage:
+                standaloneTasks.length === 0
+                  ? 0
+                  : Math.round(
+                      (standaloneTasks.filter((t) => t.status === 'completed').length /
+                        standaloneTasks.length) *
+                        100
+                    )
+            }}
+            isRunning={isRunning && teamTasks.length === 0}
+          />
         </>
       )}
 
       {/* No plan: show all tasks as before */}
       {!plan && todos.length > 0 && standaloneTasks.length === 0 && (
-        <TodoList todos={todos} progress={progress} isRunning={isRunning && teamTasks.length === 0} />
+        <TodoList
+          todos={todos}
+          progress={progress}
+          isRunning={isRunning && teamTasks.length === 0}
+        />
       )}
 
-      {(planTasks.length > 0 || standaloneTasks.length > 0 || todos.length > 0) && teamTasks.length > 0 && <Separator />}
+      {(planTasks.length > 0 || standaloneTasks.length > 0 || todos.length > 0) &&
+        teamTasks.length > 0 && <Separator />}
       {teamTasks.length > 0 && (
-        <TeamTaskList
-          tasks={teamTasks}
-          teamName={activeTeam?.name ?? 'Team'}
-          isRunning={isRunning}
-        />
+        <TeamTaskList tasks={teamTasks} teamName={teamName} isRunning={isRunning} />
       )}
       {isRunning && !hasContent && (
         <div className="flex items-center gap-2 py-4 justify-center text-sm text-muted-foreground">
@@ -116,7 +134,15 @@ export function StepsPanel(): React.JSX.Element {
   )
 }
 
-function TodoList({ todos, progress, isRunning }: { todos: TaskItem[]; progress: { total: number; completed: number; percentage: number }; isRunning: boolean }): React.JSX.Element {
+function TodoList({
+  todos,
+  progress,
+  isRunning
+}: {
+  todos: TaskItem[]
+  progress: { total: number; completed: number; percentage: number }
+  isRunning: boolean
+}): React.JSX.Element {
   const { t } = useTranslation('cowork')
   return (
     <div className="space-y-2">
@@ -250,9 +276,7 @@ function TeamTaskList({
             </span>
             <div className="min-w-0 flex-1">
               <span
-                className={cn(
-                  task.status === 'completed' && 'text-muted-foreground line-through'
-                )}
+                className={cn(task.status === 'completed' && 'text-muted-foreground line-through')}
               >
                 {task.activeForm ?? task.subject}
               </span>

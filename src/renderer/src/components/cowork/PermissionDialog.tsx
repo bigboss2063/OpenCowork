@@ -178,7 +178,8 @@ function formatToolSummary(name: string, input: Record<string, unknown>): string
   if (name === 'Delete') return `Delete: ${input.file_path ?? input.path ?? ''}`
   if (name === 'TaskCreate') return `Create task: ${input.subject ?? ''}`
   if (name === 'TaskGet') return `Get task: #${input.taskId ?? ''}`
-  if (name === 'TaskUpdate') return `Update task: #${input.taskId ?? ''}${input.status ? ` → ${input.status}` : ''}`
+  if (name === 'TaskUpdate')
+    return `Update task: #${input.taskId ?? ''}${input.status ? ` → ${input.status}` : ''}`
   if (name === 'TaskList') return `List all tasks`
   if (name === 'Task') return `[${input.subagent_type ?? '?'}] ${input.description ?? ''}`
   return null
@@ -224,11 +225,10 @@ export function PermissionDialog({
       : meta?.risk === 'medium'
         ? 'text-amber-500'
         : 'text-muted-foreground'
-  const activeSession = useChatStore((s) => {
+  const workingFolder = useChatStore((s) => {
     const id = s.activeSessionId
-    return id ? s.sessions.find((sess) => sess.id === id) : undefined
+    return id ? s.sessions.find((sess) => sess.id === id)?.workingFolder : undefined
   })
-  const workingFolder = activeSession?.workingFolder
 
   return (
     <AlertDialog open={!!toolCall}>
@@ -293,7 +293,8 @@ export function PermissionDialog({
             {t('permission.autoApproveAll')}
           </p>
           <AlertDialogCancel onClick={onDeny}>
-            {t('action.deny', { ns: 'common' })} <kbd className="ml-1.5 rounded border bg-muted px-1 text-[10px]">N</kbd>
+            {t('action.deny', { ns: 'common' })}{' '}
+            <kbd className="ml-1.5 rounded border bg-muted px-1 text-[10px]">N</kbd>
           </AlertDialogCancel>
           <AlertDialogAction onClick={onAllow}>
             {t('action.allow', { ns: 'common' })}{' '}

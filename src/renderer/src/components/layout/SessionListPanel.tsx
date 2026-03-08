@@ -149,8 +149,8 @@ export function SessionListPanel(): React.JSX.Element {
   const togglePinSession = useChatStore((s) => s.togglePinSession)
   const mode = useUIStore((s) => s.mode)
   const runningSessions = useAgentStore((s) => s.runningSessions)
-  const activeSubAgents = useAgentStore((s) => s.activeSubAgents)
-  const activeTeam = useTeamStore((s) => s.activeTeam)
+  const runningSubAgentSessionIdsSig = useAgentStore((s) => s.runningSubAgentSessionIdsSig)
+  const activeTeamSessionId = useTeamStore((s) => s.activeTeam?.sessionId ?? null)
   const [search, setSearch] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -180,6 +180,10 @@ export function SessionListPanel(): React.JSX.Element {
       useChatStore.getState().sessions.find((session) => session.id === sessionId),
     []
   )
+  const runningSubAgentSessionIds = useMemo(
+    () => new Set(runningSubAgentSessionIdsSig ? runningSubAgentSessionIdsSig.split('\u0000') : []),
+    [runningSubAgentSessionIdsSig]
+  )
 
   useEffect(() => {
     if (!renameDialog) return
@@ -190,11 +194,11 @@ export function SessionListPanel(): React.JSX.Element {
     if (!deleteTarget) return null
     const id = deleteTarget.id
     const isAgentRunning = runningSessions[id] === 'running'
-    const hasActiveSubAgents = Object.values(activeSubAgents).some((sa) => sa.sessionId === id)
-    const hasActiveTeam = activeTeam?.sessionId === id
+    const hasActiveSubAgents = runningSubAgentSessionIds.has(id)
+    const hasActiveTeam = activeTeamSessionId === id
     const hasRunning = isAgentRunning || hasActiveSubAgents || hasActiveTeam
     return { isAgentRunning, hasActiveSubAgents, hasActiveTeam, hasRunning }
-  }, [deleteTarget, runningSessions, activeSubAgents, activeTeam])
+  }, [deleteTarget, runningSessions, runningSubAgentSessionIds, activeTeamSessionId])
 
   const confirmDelete = useCallback(() => {
     if (!deleteTarget) return
@@ -811,10 +815,8 @@ export function SessionListPanel(): React.JSX.Element {
                                 onClick={() => {
                                   const hasRunning =
                                     runningSessions[session.id] === 'running' ||
-                                    Object.values(activeSubAgents).some(
-                                      (sa) => sa.sessionId === session.id
-                                    ) ||
-                                    activeTeam?.sessionId === session.id
+                                    runningSubAgentSessionIds.has(session.id) ||
+                                    activeTeamSessionId === session.id
                                   if (session.messageCount > 0 || hasRunning) {
                                     setDeleteTarget({
                                       id: session.id,

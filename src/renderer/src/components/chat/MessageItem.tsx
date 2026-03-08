@@ -1,7 +1,5 @@
 import * as React from 'react'
 import type { ToolResultContent } from '@renderer/lib/api/types'
-import { useChatStore } from '@renderer/stores/chat-store'
-import { useShallow } from 'zustand/react/shallow'
 import { UserMessage } from './UserMessage'
 import { AssistantMessage } from './AssistantMessage'
 import { Users, ChevronDown } from 'lucide-react'
@@ -12,7 +10,7 @@ import type { EditableUserMessageDraft } from '@renderer/lib/image-attachments'
 import type { UnifiedMessage } from '@renderer/lib/api/types'
 
 interface MessageItemProps {
-  sessionId: string
+  message: UnifiedMessage
   messageId: string
   isStreaming?: boolean
   isLastUserMessage?: boolean
@@ -24,7 +22,8 @@ function getContentSignal(content: UnifiedMessage['content']): string {
   if (typeof content === 'string') return `s:${content.length}:${content.slice(-32)}`
   const last = content[content.length - 1]
   if (!last) return 'a:0'
-  if (last.type === 'text') return `a:${content.length}:t:${last.text.length}:${last.text.slice(-32)}`
+  if (last.type === 'text')
+    return `a:${content.length}:t:${last.text.length}:${last.text.slice(-32)}`
   if (last.type === 'thinking') {
     return `a:${content.length}:h:${last.thinking.length}:${last.completedAt ?? 0}`
   }
@@ -34,7 +33,8 @@ function getContentSignal(content: UnifiedMessage['content']): string {
   if (last.type === 'tool_result') {
     return `a:${content.length}:r:${last.toolUseId}:${typeof last.content === 'string' ? last.content.length : last.content.length}`
   }
-  if (last.type === 'image_error') return `a:${content.length}:e:${last.code}:${last.message.length}`
+  if (last.type === 'image_error')
+    return `a:${content.length}:e:${last.code}:${last.message.length}`
   return `a:${content.length}:i:${last.source.type}:${last.source.url ?? last.source.data?.length ?? 0}`
 }
 
@@ -80,35 +80,14 @@ function TeamNotification({ content }: { content: string }): React.JSX.Element {
 }
 
 function MessageItemInner({
-  sessionId,
+  message,
   messageId,
   isStreaming,
   isLastUserMessage,
   onEditUserMessage,
   toolResults
 }: MessageItemProps): React.JSX.Element | null {
-  const message = useChatStore(
-    useShallow((s) => {
-      const current = s.sessions
-        .find((session) => session.id === sessionId)
-        ?.messages.find((item) => item.id === messageId)
-      if (!current) return null
-      return {
-        id: current.id,
-        role: current.role,
-        content: current.content,
-        createdAt: current.createdAt,
-        usage: current.usage,
-        source: current.source,
-        contentSignal: getContentSignal(current.content),
-        usageSignal: current.usage
-          ? `${current.usage.inputTokens}:${current.usage.outputTokens}:${current.usage.totalDurationMs ?? 0}`
-          : ''
-      }
-    })
-  )
-
-  if (!message) return null
+  if (message.id !== messageId) return null
 
   const inner = (() => {
     switch (message.role) {
@@ -153,7 +132,16 @@ function MessageItemInner({
   if (!inner) return null
 
   return (
-    <SlideIn className="group/ts relative" direction="up" offset={10} duration={0.3}>
+    <SlideIn
+      className="group/ts relative"
+      direction="up"
+      offset={10}
+      duration={0.3}
+      style={{
+        contentVisibility: 'auto',
+        containIntrinsicSize: '320px'
+      }}
+    >
       <span className="absolute -left-12 top-1 hidden group-hover/ts:block text-[10px] text-muted-foreground/40 whitespace-nowrap">
         {formatTime(message.createdAt)}
       </span>
@@ -181,12 +169,23 @@ function areToolResultsEqual(
 }
 
 function areEqual(prev: MessageItemProps, next: MessageItemProps): boolean {
+  const prevUsageSignal = prev.message.usage
+    ? `${prev.message.usage.inputTokens}:${prev.message.usage.outputTokens}:${prev.message.usage.totalDurationMs ?? 0}`
+    : ''
+  const nextUsageSignal = next.message.usage
+    ? `${next.message.usage.inputTokens}:${next.message.usage.outputTokens}:${next.message.usage.totalDurationMs ?? 0}`
+    : ''
+
   return (
-    prev.sessionId === next.sessionId &&
     prev.messageId === next.messageId &&
     prev.isStreaming === next.isStreaming &&
     prev.isLastUserMessage === next.isLastUserMessage &&
     prev.onEditUserMessage === next.onEditUserMessage &&
+    prev.message.role === next.message.role &&
+    prev.message.createdAt === next.message.createdAt &&
+    prev.message.source === next.message.source &&
+    getContentSignal(prev.message.content) === getContentSignal(next.message.content) &&
+    prevUsageSignal === nextUsageSignal &&
     areToolResultsEqual(prev.toolResults, next.toolResults)
   )
 }

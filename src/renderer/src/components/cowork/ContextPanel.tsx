@@ -1,6 +1,23 @@
 import { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from 'react-i18next'
-import { Database, FolderOpen, FolderPlus, RefreshCw, MessageSquare, Clock, Cpu, Zap, ExternalLink, Copy, Check, Wrench, Brain, ShieldCheck, Archive } from 'lucide-react'
+import {
+  Database,
+  FolderOpen,
+  FolderPlus,
+  RefreshCw,
+  MessageSquare,
+  Clock,
+  Cpu,
+  Zap,
+  ExternalLink,
+  Copy,
+  Check,
+  Wrench,
+  Brain,
+  ShieldCheck,
+  Archive
+} from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Separator } from '@renderer/components/ui/separator'
 import { useChatStore } from '@renderer/stores/chat-store'
@@ -21,33 +38,61 @@ export function ContextPanel(): React.JSX.Element {
   const [showCompressPanel, setShowCompressPanel] = useState(false)
   const [focusPrompt, setFocusPrompt] = useState('')
   const { manualCompressContext } = useChatActions()
-  const sessions = useChatStore((s) => s.sessions)
-  const projects = useChatStore((s) => s.projects)
-  const activeSessionId = useChatStore((s) => s.activeSessionId)
-  const activeProjectId = useChatStore((s) => s.activeProjectId)
-  const ensureDefaultProject = useChatStore((s) => s.ensureDefaultProject)
-  const updateProjectDirectory = useChatStore((s) => s.updateProjectDirectory)
-  const activeSession = sessions.find((s) => s.id === activeSessionId)
-  const resolvedProjectId = activeSession?.projectId ?? activeProjectId ?? null
-  const activeProject = resolvedProjectId
-    ? projects.find((project) => project.id === resolvedProjectId)
-    : undefined
+  const {
+    activeSessionId,
+    resolvedProjectId,
+    activeSession,
+    activeProject,
+    ensureDefaultProject,
+    updateProjectDirectory
+  } = useChatStore(
+    useShallow((s) => {
+      const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
+      const resolvedProjectId = activeSession?.projectId ?? s.activeProjectId ?? null
+      const activeProject = resolvedProjectId
+        ? s.projects.find((project) => project.id === resolvedProjectId)
+        : undefined
+      return {
+        activeSessionId: s.activeSessionId,
+        resolvedProjectId,
+        activeSession,
+        activeProject,
+        ensureDefaultProject: s.ensureDefaultProject,
+        updateProjectDirectory: s.updateProjectDirectory
+      }
+    })
+  )
   const workingFolder = activeProject?.workingFolder
-  const backgroundProcesses = useAgentStore((s) => s.backgroundProcesses)
+  const runningCommandIdsSig = useAgentStore((s) =>
+    Object.values(s.backgroundProcesses)
+      .filter(
+        (p) =>
+          p.source === 'bash-tool' &&
+          p.status === 'running' &&
+          (!activeSessionId || p.sessionId === activeSessionId)
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((p) => p.id)
+      .join('\u0000')
+  )
   const stopBackgroundProcess = useAgentStore((s) => s.stopBackgroundProcess)
   const openDetailPanel = useUIStore((s) => s.openDetailPanel)
   const activeProvider = useProviderStore((s) => s.getActiveProvider())
   const activeModelCfg = useProviderStore((s) => s.getActiveModelConfig())
-  const provider = activeProvider?.name ?? useSettingsStore((s) => s.provider)
-  const model = activeModelCfg?.name ?? useSettingsStore((s) => s.model)
-  const runningCommands = Object.values(backgroundProcesses)
-    .filter(
-      (p) =>
-        p.source === 'bash-tool' &&
-        p.status === 'running' &&
-        (!activeSessionId || p.sessionId === activeSessionId)
-    )
-    .sort((a, b) => b.createdAt - a.createdAt)
+  const fallbackProvider = useSettingsStore((s) => s.provider)
+  const fallbackModel = useSettingsStore((s) => s.model)
+  const provider = activeProvider?.name ?? fallbackProvider
+  const model = activeModelCfg?.name ?? fallbackModel
+  const runningCommands = runningCommandIdsSig
+    ? runningCommandIdsSig.split('\u0000').reduce(
+        (list, id) => {
+          const process = useAgentStore.getState().backgroundProcesses[id]
+          if (process) list.push(process)
+          return list
+        },
+        [] as Array<ReturnType<typeof useAgentStore.getState>['backgroundProcesses'][string]>
+      )
+    : []
 
   const handleSelectFolder = async (): Promise<void> => {
     const result = (await ipcClient.invoke('fs:select-folder')) as {
@@ -65,7 +110,7 @@ export function ContextPanel(): React.JSX.Element {
 
     updateProjectDirectory(projectId, {
       workingFolder: result.path,
-      sshConnectionId: null,
+      sshConnectionId: null
     })
   }
 
@@ -80,12 +125,20 @@ export function ContextPanel(): React.JSX.Element {
           <div className="space-y-1.5">
             <button
               className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm text-left hover:bg-muted/50 transition-colors group"
-              onClick={() => { navigator.clipboard.writeText(workingFolder!); setCopiedPath(true); setTimeout(() => setCopiedPath(false), 1500) }}
+              onClick={() => {
+                navigator.clipboard.writeText(workingFolder!)
+                setCopiedPath(true)
+                setTimeout(() => setCopiedPath(false), 1500)
+              }}
               title={t('context.clickToCopy')}
             >
               <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 truncate flex-1">{workingFolder}</span>
-              {copiedPath ? <Check className="size-3 shrink-0 text-green-500" /> : <Copy className="size-3 shrink-0 text-muted-foreground/0 group-hover:text-muted-foreground transition-colors" />}
+              {copiedPath ? (
+                <Check className="size-3 shrink-0 text-green-500" />
+              ) : (
+                <Copy className="size-3 shrink-0 text-muted-foreground/0 group-hover:text-muted-foreground transition-colors" />
+              )}
             </button>
             <div className="flex items-center gap-1">
               <Button
@@ -133,33 +186,31 @@ export function ContextPanel(): React.JSX.Element {
               <div className="flex items-center gap-2 text-muted-foreground">
                 <MessageSquare className="size-3 shrink-0" />
                 <span>
-                  {activeSession.messages.filter((m) => m.role !== 'system').length} {tCommon('unit.messages')}
-                  <span className="text-muted-foreground/50"> ({activeSession.messages.filter((m) => m.role === 'user').length} {tCommon('unit.turns')})</span>
+                  {activeSession.messages.filter((m) => m.role !== 'system').length}{' '}
+                  {tCommon('unit.messages')}
+                  <span className="text-muted-foreground/50">
+                    {' '}
+                    ({activeSession.messages.filter((m) => m.role === 'user').length}{' '}
+                    {tCommon('unit.turns')})
+                  </span>
                 </span>
               </div>
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Clock className="size-3 shrink-0" />
                 <span>
                   Created {new Date(activeSession.createdAt).toLocaleDateString()}
-                  {' · '}
-                  {(() => {
-                    const mins = Math.floor((Date.now() - activeSession.createdAt) / 60000)
-                    if (mins < 1) return 'just now'
-                    if (mins < 60) return `${mins}m ago`
-                    const hrs = Math.floor(mins / 60)
-                    if (hrs < 24) return `${hrs}h ago`
-                    return `${Math.floor(hrs / 24)}d ago`
-                  })()}
-                  {activeSession.messages.length >= 2 && (() => {
-                    const first = activeSession.messages[0]?.createdAt
-                    const last = activeSession.messages[activeSession.messages.length - 1]?.createdAt
-                    if (!first || !last || last <= first) return null
-                    const secs = Math.floor((last - first) / 1000)
-                    if (secs < 60) return ` · ${secs}s session`
-                    const mins = Math.floor(secs / 60)
-                    if (mins < 60) return ` · ${mins}m session`
-                    return ` · ${Math.floor(mins / 60)}h${mins % 60}m session`
-                  })()}
+                  {activeSession.messages.length >= 2 &&
+                    (() => {
+                      const first = activeSession.messages[0]?.createdAt
+                      const last =
+                        activeSession.messages[activeSession.messages.length - 1]?.createdAt
+                      if (!first || !last || last <= first) return null
+                      const secs = Math.floor((last - first) / 1000)
+                      if (secs < 60) return ` · ${secs}s session`
+                      const mins = Math.floor(secs / 60)
+                      if (mins < 60) return ` · ${mins}m session`
+                      return ` · ${Math.floor(mins / 60)}h${mins % 60}m session`
+                    })()}
                 </span>
               </div>
               {(() => {
@@ -203,7 +254,9 @@ export function ContextPanel(): React.JSX.Element {
               })()}
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Cpu className="size-3 shrink-0" />
-                <span className="truncate">{model} ({provider})</span>
+                <span className="truncate">
+                  {model} ({provider})
+                </span>
               </div>
               {runningCommands.length > 0 && (
                 <div className="space-y-1.5 pt-1">
@@ -249,7 +302,8 @@ export function ContextPanel(): React.JSX.Element {
                     if (m.usage) {
                       acc.input += m.usage.inputTokens
                       acc.output += m.usage.outputTokens
-                      if (m.usage.cacheCreationTokens) acc.cacheCreation += m.usage.cacheCreationTokens
+                      if (m.usage.cacheCreationTokens)
+                        acc.cacheCreation += m.usage.cacheCreationTokens
                       if (m.usage.cacheReadTokens) acc.cacheRead += m.usage.cacheReadTokens
                       if (m.usage.reasoningTokens) acc.reasoning += m.usage.reasoningTokens
                     }
@@ -260,7 +314,9 @@ export function ContextPanel(): React.JSX.Element {
                 // Include team member token usage (active team + history for this session)
                 const teamStore = useTeamStore.getState()
                 const allTeamMembers = [
-                  ...(teamStore.activeTeam?.sessionId === activeSessionId ? teamStore.activeTeam.members : []),
+                  ...(teamStore.activeTeam?.sessionId === activeSessionId
+                    ? teamStore.activeTeam.members
+                    : []),
                   ...teamStore.teamHistory
                     .filter((t) => t.sessionId === activeSessionId)
                     .flatMap((t) => t.members)
@@ -269,13 +325,21 @@ export function ContextPanel(): React.JSX.Element {
                   if (member.usage) {
                     totals.input += member.usage.inputTokens
                     totals.output += member.usage.outputTokens
-                    if (member.usage.cacheCreationTokens) totals.cacheCreation += member.usage.cacheCreationTokens
-                    if (member.usage.cacheReadTokens) totals.cacheRead += member.usage.cacheReadTokens
-                    if (member.usage.reasoningTokens) totals.reasoning += member.usage.reasoningTokens
+                    if (member.usage.cacheCreationTokens)
+                      totals.cacheCreation += member.usage.cacheCreationTokens
+                    if (member.usage.cacheReadTokens)
+                      totals.cacheRead += member.usage.cacheReadTokens
+                    if (member.usage.reasoningTokens)
+                      totals.reasoning += member.usage.reasoningTokens
                   }
                 }
                 if (totals.input + totals.output === 0) return null
-                const totalUsage = { inputTokens: totals.input, outputTokens: totals.output, cacheCreationTokens: totals.cacheCreation || undefined, cacheReadTokens: totals.cacheRead || undefined }
+                const totalUsage = {
+                  inputTokens: totals.input,
+                  outputTokens: totals.output,
+                  cacheCreationTokens: totals.cacheCreation || undefined,
+                  cacheReadTokens: totals.cacheRead || undefined
+                }
                 const cost = calculateCost(totalUsage, activeModelCfg)
                 const totalTokens = totals.input + totals.output
                 const ctxLimit = activeModelCfg?.contextLength ?? null
@@ -283,28 +347,56 @@ export function ContextPanel(): React.JSX.Element {
                 // Fallback to inputTokens for older messages that don't have contextTokens
                 const lastUsage = [...activeSession.messages].reverse().find((m) => m.usage)?.usage
                 const ctxUsed = lastUsage?.contextTokens ?? lastUsage?.inputTokens ?? 0
-                const pct = ctxLimit && ctxUsed > 0 ? Math.min((ctxUsed / ctxLimit) * 100, 100) : null
-                const barColor = pct === null ? '' : pct > 80 ? 'bg-red-500' : pct > 50 ? 'bg-amber-500' : 'bg-green-500'
+                const pct =
+                  ctxLimit && ctxUsed > 0 ? Math.min((ctxUsed / ctxLimit) * 100, 100) : null
+                const barColor =
+                  pct === null
+                    ? ''
+                    : pct > 80
+                      ? 'bg-red-500'
+                      : pct > 50
+                        ? 'bg-amber-500'
+                        : 'bg-green-500'
                 return (
                   <>
                     <div className="flex items-center gap-2 text-muted-foreground">
                       <Zap className="size-3 shrink-0" />
                       <span>
                         {formatTokens(totalTokens)} tokens
-                        <span className="text-muted-foreground/50"> ({formatTokens(totals.input)}↓ {formatTokens(totals.output)}↑)</span>
-                        {cost !== null && <span className="text-emerald-500/70"> · {formatCost(cost)}</span>}
-                        {totals.cacheRead > 0 && <span className="text-green-500/60"> · {formatTokens(totals.cacheRead)} {tCommon('unit.cached')}</span>}
-                        {totals.reasoning > 0 && <span className="text-blue-500/60"> · {formatTokens(totals.reasoning)} {tCommon('unit.reasoning')}</span>}
+                        <span className="text-muted-foreground/50">
+                          {' '}
+                          ({formatTokens(totals.input)}↓ {formatTokens(totals.output)}↑)
+                        </span>
+                        {cost !== null && (
+                          <span className="text-emerald-500/70"> · {formatCost(cost)}</span>
+                        )}
+                        {totals.cacheRead > 0 && (
+                          <span className="text-green-500/60">
+                            {' '}
+                            · {formatTokens(totals.cacheRead)} {tCommon('unit.cached')}
+                          </span>
+                        )}
+                        {totals.reasoning > 0 && (
+                          <span className="text-blue-500/60">
+                            {' '}
+                            · {formatTokens(totals.reasoning)} {tCommon('unit.reasoning')}
+                          </span>
+                        )}
                       </span>
                     </div>
                     {pct !== null && (
                       <div className="mt-1 space-y-0.5">
                         <div className="flex items-center justify-between text-[9px] text-muted-foreground/40">
                           <span>{tCommon('contextWindow')}</span>
-                          <span>{formatTokens(ctxUsed)} / {formatTokens(ctxLimit!)} ({pct.toFixed(0)}%)</span>
+                          <span>
+                            {formatTokens(ctxUsed)} / {formatTokens(ctxLimit!)} ({pct.toFixed(0)}%)
+                          </span>
                         </div>
                         <div className="h-1.5 w-full rounded-full bg-muted/40 overflow-hidden">
-                          <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
+                          <div
+                            className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                            style={{ width: `${pct}%` }}
+                          />
                         </div>
                       </div>
                     )}
@@ -364,7 +456,10 @@ export function ContextPanel(): React.JSX.Element {
                             size="sm"
                             className="h-5 px-2 text-[10px] text-muted-foreground"
                             disabled={compressing}
-                            onClick={() => { setShowCompressPanel(false); setFocusPrompt('') }}
+                            onClick={() => {
+                              setShowCompressPanel(false)
+                              setFocusPrompt('')
+                            }}
                           >
                             取消
                           </Button>
@@ -383,9 +478,7 @@ export function ContextPanel(): React.JSX.Element {
         <div className="flex flex-col items-center justify-center py-8 text-center">
           <Database className="mb-3 size-8 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground">{t('context.noContext')}</p>
-          <p className="mt-1 text-xs text-muted-foreground/60">
-            {t('context.noContextDesc')}
-          </p>
+          <p className="mt-1 text-xs text-muted-foreground/60">{t('context.noContextDesc')}</p>
         </div>
       )}
     </div>

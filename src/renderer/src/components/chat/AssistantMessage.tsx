@@ -66,6 +66,7 @@ const SPECIAL_TOOLS = new Set([
   'AskUserQuestion',
   IMAGE_GENERATE_TOOL_NAME
 ])
+const EMPTY_LIVE_TOOL_CALLS: ToolCallState[] = []
 
 function stripThinkTagMarkers(text: string): string {
   return text.replace(/<\s*\/?\s*think\s*>/gi, '')
@@ -589,19 +590,6 @@ export function AssistantMessage({
       .join('\n')
   }, [content, usage, isStreaming])
   const fallbackTokens = useMemoizedTokens(plainTextForTokens)
-  const toolCallsData = useAgentStore(
-    useShallow((s) => {
-      if (!isStreaming) return null
-      return { executed: s.executedToolCalls, pending: s.pendingToolCalls }
-    })
-  )
-  const effectiveLiveToolCallMap = useMemo(() => {
-    if (!toolCallsData) return null
-    const map = new Map<string, ToolCallState>()
-    for (const t of toolCallsData.executed) map.set(t.id, t)
-    for (const t of toolCallsData.pending) map.set(t.id, t)
-    return map
-  }, [toolCallsData])
 
   const isGeneratingImage = useChatStore((s) =>
     msgId ? !!s.generatingImageMessages[msgId] : false
@@ -617,6 +605,36 @@ export function AssistantMessage({
     () => (Array.isArray(content) ? normalizeStructuredBlocks(content) : null),
     [content]
   )
+  const liveToolCallIds = useMemo(() => {
+    if (!isStreaming || !normalizedContent) return []
+    return normalizedContent
+      .filter(
+        (block): block is Extract<ContentBlock, { type: 'tool_use' }> => block.type === 'tool_use'
+      )
+      .map((block) => block.id)
+  }, [isStreaming, normalizedContent])
+  const liveToolCalls = useAgentStore(
+    useShallow((s) => {
+      if (!isStreaming || liveToolCallIds.length === 0) return EMPTY_LIVE_TOOL_CALLS
+      const idSet = new Set(liveToolCallIds)
+      const matches: ToolCallState[] = []
+      for (const toolCall of s.pendingToolCalls) {
+        if (idSet.has(toolCall.id)) matches.push(toolCall)
+      }
+      for (const toolCall of s.executedToolCalls) {
+        if (idSet.has(toolCall.id)) matches.push(toolCall)
+      }
+      return matches
+    })
+  )
+  const effectiveLiveToolCallMap = useMemo(() => {
+    if (!isStreaming || liveToolCalls.length === 0) return null
+    const map = new Map<string, ToolCallState>()
+    for (const toolCall of liveToolCalls) {
+      map.set(toolCall.id, toolCall)
+    }
+    return map
+  }, [isStreaming, liveToolCalls])
   const structuredToolCount = useMemo(
     () => normalizedContent?.filter((block) => block.type === 'tool_use').length ?? 0,
     [normalizedContent]

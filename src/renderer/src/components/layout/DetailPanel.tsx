@@ -11,7 +11,7 @@ import {
   ChevronDown,
   ChevronRight,
   Wrench,
-  History,
+  History
 } from 'lucide-react'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { useTeamStore, type ActiveTeam } from '@renderer/stores/team-store'
@@ -26,6 +26,7 @@ import { cn } from '@renderer/lib/utils'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { AnimatePresence, motion } from 'motion/react'
+import { useShallow } from 'zustand/react/shallow'
 import { FadeIn } from '@renderer/components/animate-ui'
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -43,7 +44,11 @@ function formatDate(ts: number): string {
 
 // ── Team History View ────────────────────────────────────────────
 
-function TeamHistoryItem({ team, isExpanded, onToggle }: {
+function TeamHistoryItem({
+  team,
+  isExpanded,
+  onToggle
+}: {
   team: ActiveTeam
   isExpanded: boolean
   onToggle: () => void
@@ -60,10 +65,18 @@ function TeamHistoryItem({ team, isExpanded, onToggle }: {
         <span className="text-xs font-semibold text-cyan-600 dark:text-cyan-400 truncate flex-1">
           {team.name}
         </span>
-        <span className="text-[9px] text-muted-foreground/50">{t('detailPanel.membersCount', { count: team.members.length })}</span>
-        <span className="text-[9px] text-muted-foreground/50">{t('detailPanel.tasksCount', { completed: completedTasks, total: team.tasks.length })}</span>
+        <span className="text-[9px] text-muted-foreground/50">
+          {t('detailPanel.membersCount', { count: team.members.length })}
+        </span>
+        <span className="text-[9px] text-muted-foreground/50">
+          {t('detailPanel.tasksCount', { completed: completedTasks, total: team.tasks.length })}
+        </span>
         <span className="text-[9px] text-muted-foreground/40">{formatDate(team.createdAt)}</span>
-        {isExpanded ? <ChevronDown className="size-3 text-muted-foreground/40" /> : <ChevronRight className="size-3 text-muted-foreground/40" />}
+        {isExpanded ? (
+          <ChevronDown className="size-3 text-muted-foreground/40" />
+        ) : (
+          <ChevronRight className="size-3 text-muted-foreground/40" />
+        )}
       </button>
       <AnimatePresence>
         {isExpanded && (
@@ -79,19 +92,29 @@ function TeamHistoryItem({ team, isExpanded, onToggle }: {
             {/* Members summary */}
             {team.members.length > 0 && (
               <div>
-                <span className="text-[9px] font-medium text-muted-foreground/50 uppercase tracking-wider">{t('detailPanel.membersLabel')}</span>
+                <span className="text-[9px] font-medium text-muted-foreground/50 uppercase tracking-wider">
+                  {t('detailPanel.membersLabel')}
+                </span>
                 <div className="mt-1 space-y-1">
                   {team.members.map((m) => (
                     <div key={m.id} className="flex items-center gap-2 text-[10px]">
-                      <span className={cn(
-                        'size-1.5 rounded-full shrink-0',
-                        m.status === 'working' ? 'bg-green-500 animate-pulse' : m.status === 'stopped' ? 'bg-muted-foreground/30' : 'bg-cyan-400',
-                      )} />
+                      <span
+                        className={cn(
+                          'size-1.5 rounded-full shrink-0',
+                          m.status === 'working'
+                            ? 'bg-green-500 animate-pulse'
+                            : m.status === 'stopped'
+                              ? 'bg-muted-foreground/30'
+                              : 'bg-cyan-400'
+                        )}
+                      />
                       <span className="font-medium text-cyan-600 dark:text-cyan-400">{m.name}</span>
                       <span className="text-muted-foreground/40">{m.toolCalls.length} calls</span>
                       <span className="text-muted-foreground/40">{m.iteration} iters</span>
                       {m.completedAt && m.startedAt && (
-                        <span className="text-muted-foreground/30">{formatElapsed(m.completedAt - m.startedAt)}</span>
+                        <span className="text-muted-foreground/30">
+                          {formatElapsed(m.completedAt - m.startedAt)}
+                        </span>
                       )}
                     </div>
                   ))}
@@ -102,20 +125,33 @@ function TeamHistoryItem({ team, isExpanded, onToggle }: {
             {/* Tasks summary */}
             {team.tasks.length > 0 && (
               <div>
-                <span className="text-[9px] font-medium text-muted-foreground/50 uppercase tracking-wider">{t('detailPanel.tasksLabel')}</span>
+                <span className="text-[9px] font-medium text-muted-foreground/50 uppercase tracking-wider">
+                  {t('detailPanel.tasksLabel')}
+                </span>
                 <div className="mt-1 space-y-0.5">
                   {team.tasks.map((task) => (
                     <div key={task.id} className="flex items-center gap-1.5 text-[10px]">
-                      <Badge variant="secondary" className={cn(
-                        'text-[7px] h-3 px-1',
-                        task.status === 'completed' ? 'bg-green-500/15 text-green-500' :
-                        task.status === 'in_progress' ? 'bg-blue-500/15 text-blue-500' :
-                        'bg-muted text-muted-foreground/60',
-                      )}>
-                        {task.status === 'completed' ? t('status.done', { ns: 'common' }) : task.status === 'in_progress' ? t('status.active', { ns: 'common' }) : t('status.pending', { ns: 'common' })}
+                      <Badge
+                        variant="secondary"
+                        className={cn(
+                          'text-[7px] h-3 px-1',
+                          task.status === 'completed'
+                            ? 'bg-green-500/15 text-green-500'
+                            : task.status === 'in_progress'
+                              ? 'bg-blue-500/15 text-blue-500'
+                              : 'bg-muted text-muted-foreground/60'
+                        )}
+                      >
+                        {task.status === 'completed'
+                          ? t('status.done', { ns: 'common' })
+                          : task.status === 'in_progress'
+                            ? t('status.active', { ns: 'common' })
+                            : t('status.pending', { ns: 'common' })}
                       </Badge>
                       <span className="truncate text-muted-foreground/70">{task.subject}</span>
-                      {task.owner && <span className="text-cyan-500/50 shrink-0">{task.owner}</span>}
+                      {task.owner && (
+                        <span className="text-cyan-500/50 shrink-0">{task.owner}</span>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -124,7 +160,9 @@ function TeamHistoryItem({ team, isExpanded, onToggle }: {
 
             {/* Messages count */}
             {team.messages.length > 0 && (
-              <span className="text-[9px] text-muted-foreground/40">{t('detailPanel.messagesExchanged', { count: team.messages.length })}</span>
+              <span className="text-[9px] text-muted-foreground/40">
+                {t('detailPanel.messagesExchanged', { count: team.messages.length })}
+              </span>
             )}
           </motion.div>
         )}
@@ -150,18 +188,25 @@ function TeamDetailView(): React.JSX.Element {
           <div>
             <div className="flex items-center gap-1.5 mb-2">
               <History className="size-3 text-muted-foreground/50" />
-              <span className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">{t('detailPanel.history')}</span>
-              <Badge variant="secondary" className="text-[8px] h-3.5 px-1">{teamHistory.length}</Badge>
+              <span className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">
+                {t('detailPanel.history')}
+              </span>
+              <Badge variant="secondary" className="text-[8px] h-3.5 px-1">
+                {teamHistory.length}
+              </Badge>
             </div>
             <div className="space-y-1.5">
-              {teamHistory.slice().reverse().map((team, i) => (
-                <TeamHistoryItem
-                  key={`${team.name}-${team.createdAt}`}
-                  team={team}
-                  isExpanded={expandedIdx === i}
-                  onToggle={() => setExpandedIdx(expandedIdx === i ? null : i)}
-                />
-              ))}
+              {teamHistory
+                .slice()
+                .reverse()
+                .map((team, i) => (
+                  <TeamHistoryItem
+                    key={`${team.name}-${team.createdAt}`}
+                    team={team}
+                    isExpanded={expandedIdx === i}
+                    onToggle={() => setExpandedIdx(expandedIdx === i ? null : i)}
+                  />
+                ))}
             </div>
           </div>
         </>
@@ -172,7 +217,17 @@ function TeamDetailView(): React.JSX.Element {
 
 // ── SubAgent Detail View ─────────────────────────────────────────
 
-function SubAgentDetailItem({ sa, isOpen, onToggle, inlineText }: { sa: SubAgentState; isOpen: boolean; onToggle: () => void; inlineText?: string }): React.JSX.Element {
+function SubAgentDetailItem({
+  sa,
+  isOpen,
+  onToggle,
+  inlineText
+}: {
+  sa: SubAgentState
+  isOpen: boolean
+  onToggle: () => void
+  inlineText?: string
+}): React.JSX.Element {
   const { t } = useTranslation('layout')
   const elapsed = sa.completedAt && sa.startedAt ? sa.completedAt - sa.startedAt : null
   const textContent = sa.streamingText || inlineText || ''
@@ -188,7 +243,10 @@ function SubAgentDetailItem({ sa, isOpen, onToggle, inlineText }: { sa: SubAgent
         <span className="text-xs font-semibold text-violet-600 dark:text-violet-400 truncate flex-1">
           {sa.name}
         </span>
-        <Badge variant={sa.isRunning ? 'default' : 'secondary'} className={cn('text-[8px] h-3.5 px-1', sa.isRunning && 'bg-violet-500 animate-pulse')}>
+        <Badge
+          variant={sa.isRunning ? 'default' : 'secondary'}
+          className={cn('text-[8px] h-3.5 px-1', sa.isRunning && 'bg-violet-500 animate-pulse')}
+        >
           {sa.isRunning ? 'running' : 'done'}
         </Badge>
         <span className="text-[9px] text-muted-foreground/40">{sa.toolCalls.length} calls</span>
@@ -198,7 +256,11 @@ function SubAgentDetailItem({ sa, isOpen, onToggle, inlineText }: { sa: SubAgent
             {formatElapsed(elapsed)}
           </span>
         )}
-        {isOpen ? <ChevronDown className="size-3 text-muted-foreground/40" /> : <ChevronRight className="size-3 text-muted-foreground/40" />}
+        {isOpen ? (
+          <ChevronDown className="size-3 text-muted-foreground/40" />
+        ) : (
+          <ChevronRight className="size-3 text-muted-foreground/40" />
+        )}
       </button>
       <AnimatePresence>
         {isOpen && (
@@ -213,7 +275,12 @@ function SubAgentDetailItem({ sa, isOpen, onToggle, inlineText }: { sa: SubAgent
               <span>{t('detailPanel.iterations', { count: sa.iteration })}</span>
               <span>·</span>
               <span>{t('detailPanel.toolCalls', { count: sa.toolCalls.length })}</span>
-              {elapsed != null && <><span>·</span><span>{formatElapsed(elapsed)}</span></>}
+              {elapsed != null && (
+                <>
+                  <span>·</span>
+                  <span>{formatElapsed(elapsed)}</span>
+                </>
+              )}
             </div>
 
             {/* Streaming text / final output */}
@@ -230,7 +297,9 @@ function SubAgentDetailItem({ sa, isOpen, onToggle, inlineText }: { sa: SubAgent
               <div>
                 <div className="flex items-center gap-1.5 mb-1">
                   <Wrench className="size-2.5 text-muted-foreground/50" />
-                  <span className="text-[9px] font-medium text-muted-foreground/50 uppercase tracking-wider">{t('detailPanel.toolCallsLabel')}</span>
+                  <span className="text-[9px] font-medium text-muted-foreground/50 uppercase tracking-wider">
+                    {t('detailPanel.toolCallsLabel')}
+                  </span>
                 </div>
                 <div className="space-y-1 max-h-[400px] overflow-y-auto">
                   {sa.toolCalls.map((tc) => (
@@ -256,25 +325,32 @@ function SubAgentDetailItem({ sa, isOpen, onToggle, inlineText }: { sa: SubAgent
   )
 }
 
-function SubAgentDetailView({ toolUseId, inlineText }: { toolUseId?: string; inlineText?: string }): React.JSX.Element {
+function SubAgentDetailView({
+  toolUseId,
+  inlineText
+}: {
+  toolUseId?: string
+  inlineText?: string
+}): React.JSX.Element {
   const { t } = useTranslation('layout')
-  const activeSubAgents = useAgentStore((s) => s.activeSubAgents)
-  const completedSubAgents = useAgentStore((s) => s.completedSubAgents)
-  const subAgentHistory = useAgentStore((s) => s.subAgentHistory)
+  const { currentAgents, subAgentHistory } = useAgentStore(
+    useShallow((s) => ({
+      currentAgents: [
+        ...Object.values(s.activeSubAgents),
+        ...Object.values(s.completedSubAgents)
+      ] as SubAgentState[],
+      subAgentHistory: s.subAgentHistory
+    }))
+  )
 
   // Accordion: only one item open at a time across all lists
   const [expandedId, setExpandedId] = React.useState<string | null>(toolUseId ?? null)
   const toggle = (id: string): void => setExpandedId((prev) => (prev === id ? null : id))
 
-  // Current active + completed
-  const currentAgents: SubAgentState[] = [
-    ...Object.values(activeSubAgents),
-    ...Object.values(completedSubAgents),
-  ]
-
   // If a specific toolUseId is requested, find and highlight it
   const targeted = toolUseId
-    ? currentAgents.find((sa) => sa.toolUseId === toolUseId) ?? subAgentHistory.find((sa) => sa.toolUseId === toolUseId)
+    ? (currentAgents.find((sa) => sa.toolUseId === toolUseId) ??
+      subAgentHistory.find((sa) => sa.toolUseId === toolUseId))
     : null
 
   return (
@@ -309,8 +385,12 @@ function SubAgentDetailView({ toolUseId, inlineText }: { toolUseId?: string; inl
         <div>
           <div className="flex items-center gap-1.5 mb-2">
             <Bot className="size-3 text-muted-foreground/50" />
-            <span className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">{t('detailPanel.current')}</span>
-            <Badge variant="secondary" className="text-[8px] h-3.5 px-1">{currentAgents.length}</Badge>
+            <span className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">
+              {t('detailPanel.current')}
+            </span>
+            <Badge variant="secondary" className="text-[8px] h-3.5 px-1">
+              {currentAgents.length}
+            </Badge>
           </div>
           <div className="space-y-1.5">
             {currentAgents.map((sa) => (
@@ -333,19 +413,26 @@ function SubAgentDetailView({ toolUseId, inlineText }: { toolUseId?: string; inl
           <div>
             <div className="flex items-center gap-1.5 mb-2">
               <History className="size-3 text-muted-foreground/50" />
-              <span className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">{t('detailPanel.history')}</span>
-              <Badge variant="secondary" className="text-[8px] h-3.5 px-1">{subAgentHistory.length}</Badge>
+              <span className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">
+                {t('detailPanel.history')}
+              </span>
+              <Badge variant="secondary" className="text-[8px] h-3.5 px-1">
+                {subAgentHistory.length}
+              </Badge>
             </div>
             <div className="space-y-1.5">
-              {subAgentHistory.slice().reverse().map((sa) => (
-                <SubAgentDetailItem
-                  key={sa.toolUseId}
-                  sa={sa}
-                  isOpen={expandedId === sa.toolUseId}
-                  onToggle={() => toggle(sa.toolUseId)}
-                  inlineText={sa.toolUseId === toolUseId ? inlineText : undefined}
-                />
-              ))}
+              {subAgentHistory
+                .slice()
+                .reverse()
+                .map((sa) => (
+                  <SubAgentDetailItem
+                    key={sa.toolUseId}
+                    sa={sa}
+                    isOpen={expandedId === sa.toolUseId}
+                    onToggle={() => toggle(sa.toolUseId)}
+                    inlineText={sa.toolUseId === toolUseId ? inlineText : undefined}
+                  />
+                ))}
             </div>
           </div>
         </>
@@ -490,25 +577,29 @@ export function DetailPanel(): React.JSX.Element {
   const content = useUIStore((s) => s.detailPanelContent)
   const closeDetailPanel = useUIStore((s) => s.closeDetailPanel)
 
-  const title = content?.type === 'team'
-    ? t('detailPanel.team')
-    : content?.type === 'subagent'
-      ? t('detailPanel.subAgent')
-      : content?.type === 'terminal'
-        ? t('detailPanel.terminal')
-      : content?.type === 'document'
-        ? content.title
-        : content?.type === 'report'
-          ? content.title
-          : t('detailPanel.details')
+  const title =
+    content?.type === 'team'
+      ? t('detailPanel.team')
+      : content?.type === 'subagent'
+        ? t('detailPanel.subAgent')
+        : content?.type === 'terminal'
+          ? t('detailPanel.terminal')
+          : content?.type === 'document'
+            ? content.title
+            : content?.type === 'report'
+              ? content.title
+              : t('detailPanel.details')
 
-  const icon = content?.type === 'team'
-    ? <Users className="size-4 text-cyan-500" />
-    : content?.type === 'subagent'
-      ? <Bot className="size-4 text-violet-500" />
-      : content?.type === 'terminal'
-        ? <Terminal className="size-4 text-emerald-500" />
-      : <FileText className="size-4 text-muted-foreground" />
+  const icon =
+    content?.type === 'team' ? (
+      <Users className="size-4 text-cyan-500" />
+    ) : content?.type === 'subagent' ? (
+      <Bot className="size-4 text-violet-500" />
+    ) : content?.type === 'terminal' ? (
+      <Terminal className="size-4 text-emerald-500" />
+    ) : (
+      <FileText className="size-4 text-muted-foreground" />
+    )
 
   return (
     <aside className="flex w-[480px] shrink-0 flex-col border-l bg-background/50 backdrop-blur-sm">
@@ -550,9 +641,7 @@ export function DetailPanel(): React.JSX.Element {
           {content?.type === 'document' && (
             <FadeIn key="document" className="h-full">
               <div className="prose prose-sm dark:prose-invert max-w-none">
-                <Markdown remarkPlugins={[remarkGfm]}>
-                  {content.content}
-                </Markdown>
+                <Markdown remarkPlugins={[remarkGfm]}>{content.content}</Markdown>
               </div>
             </FadeIn>
           )}
@@ -568,7 +657,10 @@ export function DetailPanel(): React.JSX.Element {
           )}
 
           {!content && (
-            <FadeIn key="empty" className="h-full flex flex-col items-center justify-center py-12 text-center">
+            <FadeIn
+              key="empty"
+              className="h-full flex flex-col items-center justify-center py-12 text-center"
+            >
               <FileText className="mb-3 size-8 text-muted-foreground/40" />
               <p className="text-sm text-muted-foreground">{t('detailPanel.noContent')}</p>
             </FadeIn>

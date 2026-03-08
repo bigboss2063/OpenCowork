@@ -11,7 +11,9 @@ interface AutoUpdateOptions {
 }
 
 let initialized = false
-let prompting = false
+const notifiedAvailableVersions = new Set<string>()
+let checkForUpdatesPromise: Promise<unknown> | null = null
+let downloadUpdatePromise: Promise<unknown> | null = null
 
 function getValidWindow(getMainWindow: WindowGetter): BrowserWindow | undefined {
   const win = getMainWindow()
@@ -63,37 +65,101 @@ function formatErrorMessage(error: unknown): string {
   return String(error)
 }
 
+function normalizeVersion(version: string | null | undefined): string {
+  return (version ?? '').trim().replace(/^v/i, '')
+}
+
+function compareVersions(left: string, right: string): number {
+  const leftParts = normalizeVersion(left).split('-')[0].split('.')
+  const rightParts = normalizeVersion(right).split('-')[0].split('.')
+  const length = Math.max(leftParts.length, rightParts.length)
+
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = Number.parseInt(leftParts[index] ?? '0', 10)
+    const rightValue = Number.parseInt(rightParts[index] ?? '0', 10)
+    const safeLeftValue = Number.isFinite(leftValue) ? leftValue : 0
+    const safeRightValue = Number.isFinite(rightValue) ? rightValue : 0
+
+    if (safeLeftValue !== safeRightValue) {
+      return safeLeftValue > safeRightValue ? 1 : -1
+    }
+  }
+
+  return 0
+}
+
+function isNewerVersion(
+  candidate: string | null | undefined,
+  current: string | null | undefined
+): boolean {
+  const normalizedCandidate = normalizeVersion(candidate)
+  const normalizedCurrent = normalizeVersion(current)
+
+  if (!normalizedCandidate || !normalizedCurrent) {
+    return false
+  }
+
+  return compareVersions(normalizedCandidate, normalizedCurrent) > 0
+}
+
+async function checkForUpdatesSafely(): Promise<unknown> {
+  if (!checkForUpdatesPromise) {
+    checkForUpdatesPromise = autoUpdater.checkForUpdates().finally(() => {
+      checkForUpdatesPromise = null
+    })
+  }
+
+  return checkForUpdatesPromise
+}
+
+async function downloadUpdateSafely(): Promise<unknown> {
+  if (!downloadUpdatePromise) {
+    downloadUpdatePromise = autoUpdater.downloadUpdate().finally(() => {
+      downloadUpdatePromise = null
+    })
+  }
+
+  return downloadUpdatePromise
+}
+
 async function handleUpdateAvailable(
   info: { version: string; releaseNotes?: unknown },
   options: AutoUpdateOptions
 ): Promise<void> {
-  if (prompting) return
-  prompting = true
-
   const win = getValidWindow(options.getMainWindow)
   if (!win) {
-    prompting = false
+    return
+  }
+
+  const currentVersion = normalizeVersion(app.getVersion())
+  const newVersion = normalizeVersion(info.version)
+
+  if (!isNewerVersion(newVersion, currentVersion)) {
+    console.log(
+      `[Updater] Ignoring non-newer update event: current=${currentVersion}, latest=${newVersion}`
+    )
+    return
+  }
+
+  if (notifiedAvailableVersions.has(newVersion)) {
+    console.log(`[Updater] Ignoring duplicate update notification for version ${newVersion}`)
     return
   }
 
   const releaseNotes = getReleaseNotesText(info.releaseNotes)
-  const currentVersion = app.getVersion()
 
-  // Send update notification to renderer process
   win.webContents.send('update:available', {
     currentVersion,
-    newVersion: info.version,
-    releaseNotes,
+    newVersion,
+    releaseNotes
   })
 
-  console.log(`[Updater] Sent update notification to renderer: ${info.version}`)
-  prompting = false
+  notifiedAvailableVersions.add(newVersion)
+  writeCrashLog('updater_update_available', { version: newVersion, currentVersion })
+  console.log(`[Updater] Sent update notification to renderer: ${newVersion}`)
 }
 
-function handleDownloadProgress(
-  progress: { percent: number },
-  getMainWindow: WindowGetter
-): void {
+function handleDownloadProgress(progress: { percent: number }, getMainWindow: WindowGetter): void {
   const win = getValidWindow(getMainWindow)
   if (!win) return
 
@@ -102,7 +168,7 @@ function handleDownloadProgress(
 
   // Send progress to renderer
   win.webContents.send('update:download-progress', {
-    percent: progress.percent,
+    percent: progress.percent
   })
 }
 
@@ -112,10 +178,7 @@ function clearWindowProgress(getMainWindow: WindowGetter): void {
   win.setProgressBar(-1)
 }
 
-function handleUpdateDownloaded(
-  info: { version: string },
-  options: AutoUpdateOptions
-): void {
+function handleUpdateDownloaded(info: { version: string }, options: AutoUpdateOptions): void {
   console.log(`[Updater] Update ${info.version} downloaded. Installing...`)
   writeCrashLog('updater_update_downloaded', { version: info.version })
   clearWindowProgress(options.getMainWindow)
@@ -154,8 +217,8 @@ export function setupAutoUpdater(options: AutoUpdateOptions): void {
   ipcMain.handle('update:check', async () => {
     try {
       console.log('[Updater] User requested update check')
-      const result = await autoUpdater.checkForUpdates()
-      const currentVersion = app.getVersion()
+      const result = (await checkForUpdatesSafely()) as { updateInfo?: { version?: string } } | null
+      const currentVersion = normalizeVersion(app.getVersion())
 
       if (!result) {
         return {
@@ -163,12 +226,12 @@ export function setupAutoUpdater(options: AutoUpdateOptions): void {
           available: false,
           currentVersion,
           latestVersion: null,
-          skipped: true,
+          skipped: true
         }
       }
 
-      const latestVersion = result.updateInfo?.version || null
-      const available = Boolean(latestVersion && latestVersion !== currentVersion)
+      const latestVersion = normalizeVersion(result.updateInfo?.version ?? null) || null
+      const available = isNewerVersion(latestVersion, currentVersion)
       return { success: true, available, currentVersion, latestVersion, skipped: false }
     } catch (error) {
       const message = formatErrorMessage(error)
@@ -181,7 +244,7 @@ export function setupAutoUpdater(options: AutoUpdateOptions): void {
   ipcMain.handle('update:download', async () => {
     try {
       console.log('[Updater] User requested download')
-      await autoUpdater.downloadUpdate()
+      await downloadUpdateSafely()
       return { success: true }
     } catch (error) {
       const message = formatErrorMessage(error)
@@ -190,16 +253,8 @@ export function setupAutoUpdater(options: AutoUpdateOptions): void {
     }
   })
 
-  // TEMPORARY: Allow update check in development mode for testing
   if (!app.isPackaged) {
     console.log('[Updater] Running in development mode - using dev-app-update.yml')
-    // In dev mode, manually trigger a test update notification after 2 seconds
-    setTimeout(() => {
-      console.log('[Updater] DEV MODE: Simulating update check...')
-      void autoUpdater.checkForUpdates().catch((error) => {
-        console.error('[Updater] DEV MODE: Check failed:', error)
-      })
-    }, 2000)
   }
 
   if (process.platform !== 'win32' && process.platform !== 'linux') {
@@ -216,8 +271,6 @@ export function setupAutoUpdater(options: AutoUpdateOptions): void {
   })
 
   autoUpdater.on('update-available', (info) => {
-    console.log(`[Updater] Update available: ${info.version}`)
-    writeCrashLog('updater_update_available', { version: info.version })
     void handleUpdateAvailable(info, options)
   })
 
@@ -246,7 +299,7 @@ export function setupAutoUpdater(options: AutoUpdateOptions): void {
   })
 
   // Check for updates immediately on startup
-  void autoUpdater.checkForUpdates().catch((error) => {
+  void checkForUpdatesSafely().catch((error) => {
     const message = formatErrorMessage(error)
     console.error('[Updater] checkForUpdates failed:', error)
     writeCrashLog('updater_check_failed', { message, error })

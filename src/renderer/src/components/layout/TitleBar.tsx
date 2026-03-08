@@ -28,6 +28,7 @@ import { useChatStore } from '@renderer/stores/chat-store'
 import { pickFriendlyMessage, type FriendlyStatus } from '@renderer/lib/api/generate-title'
 import { useTheme } from 'next-themes'
 import { useTranslation } from 'react-i18next'
+import { useShallow } from 'zustand/react/shallow'
 import { WindowControls } from './WindowControls'
 
 export function TitleBar(): React.JSX.Element {
@@ -49,28 +50,55 @@ export function TitleBar(): React.JSX.Element {
   const streamingMessageId = useChatStore((s) => s.streamingMessageId)
   const autoApprove = useSettingsStore((s) => s.autoApprove)
   const pendingApprovals = useAgentStore((s) => s.pendingToolCalls.length)
-  const errorCount = useAgentStore(
-    (s) => s.executedToolCalls.filter((t) => t.status === 'error').length
+  const errorCount = useAgentStore((s) =>
+    s.executedToolCalls.reduce(
+      (count, toolCall) => count + (toolCall.status === 'error' ? 1 : 0),
+      0
+    )
   )
-  const activeSubAgents = useAgentStore((s) => s.activeSubAgents)
-  const backgroundProcesses = useAgentStore((s) => s.backgroundProcesses)
+  const runningSubAgentNamesSig = useAgentStore((s) => s.runningSubAgentNamesSig)
+  const runningBackgroundCommandIdsSig = useAgentStore((s) =>
+    Object.values(s.backgroundProcesses)
+      .filter(
+        (p) =>
+          p.source === 'bash-tool' &&
+          p.status === 'running' &&
+          (!activeSessionId || p.sessionId === activeSessionId)
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((p) => p.id)
+      .join('\u0000')
+  )
   const stopBackgroundProcess = useAgentStore((s) => s.stopBackgroundProcess)
   const runningSubAgents = useMemo(
-    () => Object.values(activeSubAgents).filter((sa) => sa.isRunning),
-    [activeSubAgents]
+    () => (runningSubAgentNamesSig ? runningSubAgentNamesSig.split('\u0000') : []),
+    [runningSubAgentNamesSig]
   )
-  const activeTeam = useTeamStore((s) => s.activeTeam)
+  const activeTeamSummary = useTeamStore(
+    useShallow((s) => {
+      const team = s.activeTeam
+      if (!team) return null
+      return {
+        name: team.name,
+        total: team.tasks.length,
+        completed: team.tasks.filter((task) => task.status === 'completed').length,
+        working: team.members.filter((member) => member.status === 'working').length
+      }
+    })
+  )
   const runningBackgroundCommands = useMemo(
     () =>
-      Object.values(backgroundProcesses)
-        .filter(
-          (p) =>
-            p.source === 'bash-tool' &&
-            p.status === 'running' &&
-            (!activeSessionId || p.sessionId === activeSessionId)
-        )
-        .sort((a, b) => b.createdAt - a.createdAt),
-    [backgroundProcesses, activeSessionId]
+      runningBackgroundCommandIdsSig
+        ? runningBackgroundCommandIdsSig.split('\u0000').reduce(
+            (list, id) => {
+              const process = useAgentStore.getState().backgroundProcesses[id]
+              if (process) list.push(process)
+              return list
+            },
+            [] as Array<ReturnType<typeof useAgentStore.getState>['backgroundProcesses'][string]>
+          )
+        : [],
+    [runningBackgroundCommandIdsSig]
   )
 
   const statusType = useMemo<FriendlyStatus>(() => {
@@ -85,7 +113,7 @@ export function TitleBar(): React.JSX.Element {
     pendingApprovals,
     streamingMessageId,
     runningSubAgents.length,
-    runningBackgroundCommands.length,
+    runningBackgroundCommands.length
   ])
 
   useEffect(() => {
@@ -302,41 +330,35 @@ export function TitleBar(): React.JSX.Element {
         {runningSubAgents.length > 0 && (
           <span className="titlebar-no-drag flex items-center gap-1 rounded bg-violet-500/10 px-1.5 py-0.5 text-[9px] font-medium text-violet-500">
             <Brain className="size-3 animate-pulse" />
-            {runningSubAgents.map((sa) => sa.name).join(', ')}
+            {runningSubAgents.join(', ')}
           </span>
         )}
 
         {/* Team indicator */}
-        {activeTeam &&
-          (() => {
-            const completed = activeTeam.tasks.filter((t) => t.status === 'completed').length
-            const total = activeTeam.tasks.length
-            const working = activeTeam.members.filter((m) => m.status === 'working').length
-            return (
-              <button
-                onClick={() => {
-                  const ui = useUIStore.getState()
-                  ui.setRightPanelOpen(true)
-                  ui.setRightPanelTab('team')
-                }}
-                className="titlebar-no-drag flex items-center gap-1 rounded bg-cyan-500/10 px-1.5 py-0.5 text-[9px] font-medium text-cyan-500 hover:bg-cyan-500/20 transition-colors"
-              >
-                <Users className="size-3" />
-                {activeTeam.name}
-                {total > 0 && (
-                  <span className="text-cyan-500/60">
-                    · {completed}/{total}✓
-                  </span>
-                )}
-                {working > 0 && (
-                  <span className="flex items-center gap-0.5">
-                    <span className="size-1.5 rounded-full bg-cyan-500 animate-pulse" />
-                    {working}
-                  </span>
-                )}
-              </button>
-            )
-          })()}
+        {activeTeamSummary && (
+          <button
+            onClick={() => {
+              const ui = useUIStore.getState()
+              ui.setRightPanelOpen(true)
+              ui.setRightPanelTab('team')
+            }}
+            className="titlebar-no-drag flex items-center gap-1 rounded bg-cyan-500/10 px-1.5 py-0.5 text-[9px] font-medium text-cyan-500 hover:bg-cyan-500/20 transition-colors"
+          >
+            <Users className="size-3" />
+            {activeTeamSummary.name}
+            {activeTeamSummary.total > 0 && (
+              <span className="text-cyan-500/60">
+                · {activeTeamSummary.completed}/{activeTeamSummary.total}✓
+              </span>
+            )}
+            {activeTeamSummary.working > 0 && (
+              <span className="flex items-center gap-0.5">
+                <span className="size-1.5 rounded-full bg-cyan-500 animate-pulse" />
+                {activeTeamSummary.working}
+              </span>
+            )}
+          </button>
+        )}
 
         {/* Error count indicator */}
         {errorCount > 0 && (
@@ -407,9 +429,9 @@ export function TitleBar(): React.JSX.Element {
         {/* Help */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <a 
-              href="https://open-cowork.shop/" 
-              target="_blank" 
+            <a
+              href="https://open-cowork.shop/"
+              target="_blank"
               rel="noreferrer"
               className="titlebar-no-drag inline-flex size-7 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 transition-all"
             >
@@ -418,7 +440,6 @@ export function TitleBar(): React.JSX.Element {
           </TooltipTrigger>
           <TooltipContent>{t('topbar.help', { defaultValue: 'Help Center' })}</TooltipContent>
         </Tooltip>
-
       </div>
 
       {/* Window Controls (Windows/Linux only) */}

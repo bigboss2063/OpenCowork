@@ -1,8 +1,11 @@
 import { ipcMain, dialog, BrowserWindow, app } from 'electron'
+import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { globSync } from 'glob'
+import { createInterface } from 'readline'
 import { recordLocalTextWriteChange } from './agent-change-handlers'
+import { createGitIgnoreMatcher } from './gitignore-utils'
 
 const IMAGE_EXTENSIONS = new Set([
   '.png',
@@ -30,6 +33,429 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
   '.tiff': 'image/tiff',
   '.heic': 'image/heic',
   '.heif': 'image/heif'
+}
+
+type GrepResultItem = { file: string; line: number; text: string }
+type GrepLimitReason = 'max_results' | 'max_output_bytes' | 'timeout' | null
+
+interface GrepCollector {
+  results: GrepResultItem[]
+  append: (filePath: string, line: number, text: string) => boolean
+  readonly limitReason: GrepLimitReason
+  readonly truncated: boolean
+}
+
+const GREP_IGNORE_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '.svn',
+  '.hg',
+  '.bzr',
+  'dist',
+  'build',
+  'out',
+  '.next',
+  '.nuxt',
+  '.output',
+  'coverage',
+  '.nyc_output',
+  '.cache',
+  '.parcel-cache',
+  'vendor',
+  'target',
+  'bin',
+  'obj',
+  '.gradle',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.venv',
+  'venv',
+  'env'
+])
+
+const GREP_BINARY_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.bmp',
+  '.webp',
+  '.svg',
+  '.ico',
+  '.mp4',
+  '.avi',
+  '.mov',
+  '.mkv',
+  '.mp3',
+  '.wav',
+  '.flac',
+  '.zip',
+  '.tar',
+  '.gz',
+  '.rar',
+  '.7z',
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.eot',
+  '.otf',
+  '.db',
+  '.sqlite',
+  '.sqlite3'
+])
+
+const GREP_MAX_RESULTS = 50
+const GREP_MAX_FILE_SIZE = 10 * 1024 * 1024
+const GREP_TIMEOUT_MS = 30000
+const GREP_MAX_LINE_LENGTH = 160
+const GREP_MAX_OUTPUT_BYTES = 8 * 1024
+
+function parseIncludePatterns(include?: string): string[] {
+  return (include ?? '')
+    .split(',')
+    .map((pattern) => pattern.trim())
+    .filter(Boolean)
+}
+
+function normalizeGrepLine(text: string): string {
+  const normalized = text.trim()
+  if (normalized.length <= GREP_MAX_LINE_LENGTH) return normalized
+  return `${normalized.slice(0, GREP_MAX_LINE_LENGTH - 1)}…`
+}
+
+function createIncludeMatcher(
+  searchRoot: string,
+  includePatterns: string[]
+): (filePath: string) => boolean {
+  if (includePatterns.length === 0) return () => true
+
+  const includeRegexCache = new Map<string, RegExp>()
+  const escapeRegExp = (value: string): string => value.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+
+  const toIncludeRegex = (globPattern: string): RegExp => {
+    const cached = includeRegexCache.get(globPattern)
+    if (cached) return cached
+
+    const pattern = globPattern.replace(/\\/g, '/')
+    const escaped = escapeRegExp(pattern)
+    const regexBody = escaped
+      .replace(/\*\*/g, '__DOUBLE_STAR__')
+      .replace(/\*/g, '[^/]*')
+      .replace(/__DOUBLE_STAR__/g, '.*')
+      .replace(/\?/g, '.')
+
+    const compiled = new RegExp(`^${regexBody}$`, 'i')
+    includeRegexCache.set(globPattern, compiled)
+    return compiled
+  }
+
+  return (filePath: string): boolean => {
+    const relPath = path.relative(searchRoot, filePath).replace(/\\/g, '/')
+    const fileName = path.basename(filePath)
+    const ext = path.extname(filePath).toLowerCase()
+
+    return includePatterns.some((rawPattern) => {
+      let pattern = rawPattern.replace(/\\/g, '/')
+      if (pattern.startsWith('./')) pattern = pattern.slice(2)
+      if (pattern.startsWith('**/')) pattern = pattern.slice(3)
+
+      if (pattern.startsWith('*.') && !pattern.includes('/')) {
+        return ext === pattern.slice(1).toLowerCase()
+      }
+
+      if (!pattern.includes('*') && !pattern.includes('?')) {
+        const lowered = pattern.toLowerCase()
+        return (
+          fileName.toLowerCase() === lowered || relPath.toLowerCase() === lowered || ext === lowered
+        )
+      }
+
+      const regexPattern = toIncludeRegex(pattern)
+      return regexPattern.test(relPath) || regexPattern.test(fileName)
+    })
+  }
+}
+
+function normalizeRipgrepGlob(pattern: string): string {
+  let normalized = pattern.replace(/\\/g, '/')
+  if (normalized.startsWith('./')) normalized = normalized.slice(2)
+  if (normalized.startsWith('**/')) normalized = normalized.slice(3)
+  if (!normalized.includes('*') && !normalized.includes('?') && normalized.startsWith('.')) {
+    return `*${normalized}`
+  }
+  return normalized
+}
+
+function isBinaryFile(filePath: string): boolean {
+  try {
+    const ext = path.extname(filePath).toLowerCase()
+    if (GREP_BINARY_EXTENSIONS.has(ext)) return true
+
+    const buffer = Buffer.alloc(512)
+    const fd = fs.openSync(filePath, 'r')
+    const bytesRead = fs.readSync(fd, buffer, 0, 512, 0)
+    fs.closeSync(fd)
+
+    for (let i = 0; i < bytesRead; i++) {
+      if (buffer[i] === 0) return true
+    }
+    return false
+  } catch {
+    return true
+  }
+}
+
+function createGrepCollector(searchRoot: string): GrepCollector {
+  const results: GrepResultItem[] = []
+  let totalBytes = 2
+  let limitReason: GrepLimitReason = null
+
+  return {
+    results,
+    append(filePath: string, line: number, text: string): boolean {
+      if (results.length >= GREP_MAX_RESULTS) {
+        limitReason ??= 'max_results'
+        return false
+      }
+
+      const candidate: GrepResultItem = {
+        file: path.relative(searchRoot, filePath),
+        line,
+        text: normalizeGrepLine(text)
+      }
+      const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8') + 1
+      if (totalBytes + candidateBytes > GREP_MAX_OUTPUT_BYTES) {
+        limitReason ??= 'max_output_bytes'
+        return false
+      }
+
+      results.push(candidate)
+      totalBytes += candidateBytes
+      return true
+    },
+    get limitReason(): GrepLimitReason {
+      return limitReason
+    },
+    get truncated(): boolean {
+      return limitReason !== null
+    }
+  }
+}
+
+async function scanFileForMatches(
+  filePath: string,
+  regex: RegExp,
+  collector: GrepCollector,
+  startTime: number
+): Promise<'continue' | 'limit' | 'timeout'> {
+  const stream = fs.createReadStream(filePath, { encoding: 'utf8' })
+  const rl = createInterface({ input: stream, crlfDelay: Infinity })
+
+  try {
+    let lineNumber = 0
+    for await (const line of rl) {
+      lineNumber += 1
+      if (Date.now() - startTime > GREP_TIMEOUT_MS) return 'timeout'
+      if (regex.test(line) && !collector.append(filePath, lineNumber, line)) return 'limit'
+    }
+    return 'continue'
+  } finally {
+    rl.close()
+    stream.destroy()
+  }
+}
+
+async function findLocalGitIgnoreRoot(startDir: string): Promise<string> {
+  let currentDir = path.resolve(startDir)
+
+  while (true) {
+    if (fs.existsSync(path.join(currentDir, '.git'))) {
+      return currentDir
+    }
+
+    const parentDir = path.dirname(currentDir)
+    if (parentDir === currentDir) {
+      return path.resolve(startDir)
+    }
+    currentDir = parentDir
+  }
+}
+
+async function createLocalGitIgnoreContext(
+  searchTarget: string,
+  extraPatterns?: string[]
+): Promise<ReturnType<typeof createGitIgnoreMatcher>> {
+  const baseDir = path.resolve(searchTarget)
+  const gitIgnoreRoot = await findLocalGitIgnoreRoot(baseDir)
+  return createGitIgnoreMatcher({
+    rootDir: gitIgnoreRoot,
+    extraPatterns,
+    readIgnoreFile: async (filePath) => {
+      try {
+        return await fs.promises.readFile(filePath, 'utf8')
+      } catch {
+        return null
+      }
+    }
+  })
+}
+
+async function runRipgrepSearch(args: {
+  pattern: string
+  searchRoot: string
+  searchTarget: string
+  targetIsDirectory: boolean
+  includePatterns: string[]
+  startTime: number
+}): Promise<{
+  results: GrepResultItem[]
+  truncated: boolean
+  timedOut: boolean
+  limitReason: GrepLimitReason
+} | null> {
+  const collector = createGrepCollector(args.searchRoot)
+  const rgArgs = [
+    '--json',
+    '--line-number',
+    '--color',
+    'never',
+    '--no-messages',
+    '--ignore-case',
+    '--hidden',
+    '--max-filesize',
+    `${Math.floor(GREP_MAX_FILE_SIZE / (1024 * 1024))}M`
+  ]
+
+  rgArgs.push('--glob', '!.*/**')
+  rgArgs.push('--glob', '!**/.*/**')
+
+  for (const dir of GREP_IGNORE_DIRS) {
+    rgArgs.push('--glob', `!${dir}/**`)
+    rgArgs.push('--glob', `!**/${dir}/**`)
+  }
+
+  for (const includePattern of args.includePatterns) {
+    rgArgs.push('--glob', normalizeRipgrepGlob(includePattern))
+  }
+
+  rgArgs.push('--', args.pattern, args.targetIsDirectory ? '.' : path.basename(args.searchTarget))
+
+  return await new Promise((resolve) => {
+    const child = spawn('rg', rgArgs, {
+      cwd: args.searchRoot,
+      windowsHide: true
+    })
+
+    let timedOut = false
+    let stdoutBuffer = ''
+    let settled = false
+
+    const finish = (
+      value: {
+        results: GrepResultItem[]
+        truncated: boolean
+        timedOut: boolean
+        limitReason: GrepLimitReason
+      } | null
+    ): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+
+    const processLine = (rawLine: string): void => {
+      if (!rawLine.trim()) return
+
+      try {
+        const parsed = JSON.parse(rawLine) as {
+          type?: string
+          data?: { path?: { text?: string }; lines?: { text?: string }; line_number?: number }
+        }
+        if (parsed.type !== 'match') return
+
+        const rawPath = parsed.data?.path?.text
+        const lineNumber = parsed.data?.line_number
+        const text = parsed.data?.lines?.text ?? ''
+        if (typeof rawPath !== 'string' || typeof lineNumber !== 'number') return
+
+        const absolutePath = path.isAbsolute(rawPath)
+          ? rawPath
+          : path.join(args.searchRoot, rawPath)
+        if (!collector.append(absolutePath, lineNumber, text)) {
+          child.kill()
+        }
+      } catch {
+        finish(null)
+      }
+    }
+
+    const flushStdout = (flush = false): void => {
+      let newlineIndex = stdoutBuffer.indexOf('\n')
+      while (newlineIndex !== -1 || (flush && stdoutBuffer.length > 0)) {
+        const endIndex = newlineIndex === -1 ? stdoutBuffer.length : newlineIndex
+        const line = stdoutBuffer.slice(0, endIndex)
+        stdoutBuffer = stdoutBuffer.slice(Math.min(endIndex + 1, stdoutBuffer.length))
+        processLine(line)
+        if (settled) return
+        newlineIndex = stdoutBuffer.indexOf('\n')
+      }
+    }
+
+    const remainingTime = Math.max(1000, GREP_TIMEOUT_MS - (Date.now() - args.startTime))
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, remainingTime)
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf8')
+      flushStdout()
+    })
+
+    child.on('error', () => {
+      finish(null)
+    })
+
+    child.on('close', (code) => {
+      flushStdout(true)
+      if (settled) return
+
+      if (timedOut || collector.truncated) {
+        finish({
+          results: collector.results,
+          truncated: true,
+          timedOut,
+          limitReason: timedOut ? 'timeout' : collector.limitReason
+        })
+        return
+      }
+
+      if (code === 0 || code === 1) {
+        finish({
+          results: collector.results,
+          truncated: false,
+          timedOut: false,
+          limitReason: null
+        })
+        return
+      }
+
+      finish(null)
+    })
+  })
 }
 
 export function registerFsHandlers(): void {
@@ -97,12 +523,24 @@ export function registerFsHandlers(): void {
 
   ipcMain.handle('fs:list-dir', async (_event, args: { path: string; ignore?: string[] }) => {
     try {
-      const entries = fs.readdirSync(args.path, { withFileTypes: true })
-      return entries.map((e) => ({
-        name: e.name,
-        type: e.isDirectory() ? 'directory' : 'file',
-        path: path.join(args.path, e.name)
-      }))
+      const resolvedPath = path.resolve(args.path)
+      const matcher = await createLocalGitIgnoreContext(resolvedPath, args.ignore)
+      const entries = await fs.promises.readdir(resolvedPath, { withFileTypes: true })
+      const items: Array<{ name: string; type: 'directory' | 'file'; path: string }> = []
+
+      for (const entry of entries) {
+        const entryPath = path.join(resolvedPath, entry.name)
+        if (await matcher.ignores(entryPath, entry.isDirectory())) continue
+        if (!entry.isDirectory() && !entry.isFile()) continue
+
+        items.push({
+          name: entry.name,
+          type: entry.isDirectory() ? 'directory' : 'file',
+          path: entryPath
+        })
+      }
+
+      return items
     } catch (err) {
       return { error: String(err) }
     }
@@ -177,8 +615,24 @@ export function registerFsHandlers(): void {
 
   ipcMain.handle('fs:glob', async (_event, args: { pattern: string; path?: string }) => {
     try {
-      const matches = globSync(args.pattern, { cwd: args.path || process.cwd() })
-      return matches
+      const cwd = path.resolve(args.path || process.cwd())
+      const matcher = await createLocalGitIgnoreContext(cwd)
+      const matches = globSync(args.pattern, { cwd })
+      const filteredMatches: string[] = []
+
+      for (const match of matches) {
+        const absolutePath = path.resolve(cwd, match)
+        let isDir = false
+        try {
+          isDir = fs.statSync(absolutePath).isDirectory()
+        } catch {
+          isDir = false
+        }
+        if (await matcher.ignores(absolutePath, isDir)) continue
+        filteredMatches.push(match)
+      }
+
+      return filteredMatches
     } catch (err) {
       return { error: String(err) }
     }
@@ -189,10 +643,6 @@ export function registerFsHandlers(): void {
     async (_event, args: { pattern: string; path?: string; include?: string }) => {
       try {
         const searchTarget = path.resolve(args.path || process.cwd())
-        const results: { file: string; line: number; text: string }[] = []
-        const MAX_RESULTS = 100
-        const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10MB
-        const TIMEOUT_MS = 30000 // 30 seconds
         const startTime = Date.now()
 
         let targetStats: fs.Stats
@@ -202,81 +652,6 @@ export function registerFsHandlers(): void {
           return { error: `Search path does not exist: ${searchTarget}` }
         }
 
-        const searchRoot = targetStats.isDirectory() ? searchTarget : path.dirname(searchTarget)
-
-        // Comprehensive ignore list (similar to ripgrep defaults)
-        const IGNORE_DIRS = new Set([
-          'node_modules',
-          '.git',
-          '.svn',
-          '.hg',
-          '.bzr',
-          'dist',
-          'build',
-          'out',
-          '.next',
-          '.nuxt',
-          '.output',
-          'coverage',
-          '.nyc_output',
-          '.cache',
-          '.parcel-cache',
-          'vendor',
-          'target',
-          'bin',
-          'obj',
-          '.gradle',
-          '__pycache__',
-          '.pytest_cache',
-          '.mypy_cache',
-          '.venv',
-          'venv',
-          'env'
-        ])
-
-        // Binary file extensions to skip
-        const BINARY_EXTENSIONS = new Set([
-          '.png',
-          '.jpg',
-          '.jpeg',
-          '.gif',
-          '.bmp',
-          '.webp',
-          '.svg',
-          '.ico',
-          '.mp4',
-          '.avi',
-          '.mov',
-          '.mkv',
-          '.mp3',
-          '.wav',
-          '.flac',
-          '.zip',
-          '.tar',
-          '.gz',
-          '.rar',
-          '.7z',
-          '.exe',
-          '.dll',
-          '.so',
-          '.dylib',
-          '.pdf',
-          '.doc',
-          '.docx',
-          '.xls',
-          '.xlsx',
-          '.ppt',
-          '.pptx',
-          '.woff',
-          '.woff2',
-          '.ttf',
-          '.eot',
-          '.otf',
-          '.db',
-          '.sqlite',
-          '.sqlite3'
-        ])
-
         let regex: RegExp
         try {
           regex = new RegExp(args.pattern, 'i')
@@ -284,168 +659,97 @@ export function registerFsHandlers(): void {
           return { error: `Invalid regex pattern: ${err}` }
         }
 
-        const includePatterns = (args.include ?? '')
-          .split(',')
-          .map((pattern) => pattern.trim())
-          .filter(Boolean)
+        const searchRoot = targetStats.isDirectory() ? searchTarget : path.dirname(searchTarget)
+        const includePatterns = parseIncludePatterns(args.include)
+        const matchesInclude = createIncludeMatcher(searchRoot, includePatterns)
+        const gitIgnoreMatcher = targetStats.isDirectory()
+          ? await createLocalGitIgnoreContext(searchRoot)
+          : null
 
-        const includeRegexCache = new Map<string, RegExp>()
+        const ripgrepResult = await runRipgrepSearch({
+          pattern: args.pattern,
+          searchRoot,
+          searchTarget,
+          targetIsDirectory: targetStats.isDirectory(),
+          includePatterns,
+          startTime
+        })
 
-        const escapeRegExp = (value: string): string => value.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-
-        const toIncludeRegex = (globPattern: string): RegExp => {
-          const cached = includeRegexCache.get(globPattern)
-          if (cached) return cached
-
-          const pattern = globPattern.replace(/\\/g, '/')
-          const escaped = escapeRegExp(pattern)
-          const regexBody = escaped
-            .replace(/\*\*/g, '__DOUBLE_STAR__')
-            .replace(/\*/g, '[^/]*')
-            .replace(/__DOUBLE_STAR__/g, '.*')
-            .replace(/\?/g, '.')
-
-          const compiled = new RegExp(`^${regexBody}$`, 'i')
-          includeRegexCache.set(globPattern, compiled)
-          return compiled
-        }
-
-        const matchesInclude = (filePath: string): boolean => {
-          if (includePatterns.length === 0) return true
-
-          const relPath = path.relative(searchRoot, filePath).replace(/\\/g, '/')
-          const fileName = path.basename(filePath)
-          const ext = path.extname(filePath).toLowerCase()
-
-          return includePatterns.some((rawPattern) => {
-            let pattern = rawPattern.replace(/\\/g, '/')
-            if (pattern.startsWith('./')) pattern = pattern.slice(2)
-
-            // Common shorthand: "**/*.ts" should match any nested file extension.
-            if (pattern.startsWith('**/')) {
-              pattern = pattern.slice(3)
-            }
-
-            if (pattern.startsWith('*.') && !pattern.includes('/')) {
-              return ext === pattern.slice(1).toLowerCase()
-            }
-
-            if (!pattern.includes('*') && !pattern.includes('?')) {
-              const lowered = pattern.toLowerCase()
-              return (
-                fileName.toLowerCase() === lowered ||
-                relPath.toLowerCase() === lowered ||
-                ext === lowered
-              )
-            }
-
-            const regexPattern = toIncludeRegex(pattern)
-            return regexPattern.test(relPath) || regexPattern.test(fileName)
-          })
-        }
-
-        // Check if file is likely binary by reading first few bytes
-        const isBinaryFile = (filePath: string): boolean => {
-          try {
-            const ext = path.extname(filePath).toLowerCase()
-            if (BINARY_EXTENSIONS.has(ext)) return true
-
-            const buffer = Buffer.alloc(512)
-            const fd = fs.openSync(filePath, 'r')
-            const bytesRead = fs.readSync(fd, buffer, 0, 512, 0)
-            fs.closeSync(fd)
-
-            // Check for null bytes (common in binary files)
-            for (let i = 0; i < bytesRead; i++) {
-              if (buffer[i] === 0) return true
-            }
-            return false
-          } catch {
-            return true // Assume binary if can't read
+        if (ripgrepResult) {
+          return {
+            results: ripgrepResult.results,
+            truncated: ripgrepResult.truncated,
+            timedOut: ripgrepResult.timedOut,
+            limitReason: ripgrepResult.limitReason,
+            searchTime: Date.now() - startTime
           }
         }
 
+        const collector = createGrepCollector(searchRoot)
+        let timedOut = false
+
         const searchFile = async (filePath: string): Promise<boolean> => {
           try {
-            // Check timeout
-            if (Date.now() - startTime > TIMEOUT_MS) {
-              return true // Signal to stop
+            if (Date.now() - startTime > GREP_TIMEOUT_MS) {
+              timedOut = true
+              return true
             }
 
-            // Check file size
             const stats = await fs.promises.stat(filePath)
-            if (stats.size > MAX_FILE_SIZE) return false
-            if (stats.size === 0) return false
-
-            // Skip binary files
+            if (stats.size > GREP_MAX_FILE_SIZE || stats.size === 0) return false
+            if (gitIgnoreMatcher && (await gitIgnoreMatcher.ignores(filePath, false))) return false
             if (isBinaryFile(filePath)) return false
 
-            // Read file asynchronously
-            const content = await fs.promises.readFile(filePath, 'utf-8')
-            const lines = content.split('\n')
-
-            for (let i = 0; i < lines.length; i++) {
-              if (results.length >= MAX_RESULTS) return true // Stop early
-
-              const line = lines[i]
-              if (regex.test(line)) {
-                results.push({
-                  file: path.relative(searchRoot, filePath),
-                  line: i + 1,
-                  text: line.trim().slice(0, 200) // Limit line length
-                })
-              }
+            const status = await scanFileForMatches(filePath, regex, collector, startTime)
+            if (status === 'timeout') {
+              timedOut = true
+              return true
             }
-            return false
+            return status === 'limit'
           } catch {
-            return false // Skip unreadable files
+            return false
           }
         }
 
         const walkDir = async (dir: string): Promise<boolean> => {
           try {
-            // Check timeout
-            if (Date.now() - startTime > TIMEOUT_MS) {
+            if (Date.now() - startTime > GREP_TIMEOUT_MS) {
+              timedOut = true
               return true
             }
 
             const entries = await fs.promises.readdir(dir, { withFileTypes: true })
-
             for (const entry of entries) {
-              if (results.length >= MAX_RESULTS) return true
+              if (collector.truncated) return true
 
               const fullPath = path.join(dir, entry.name)
-
               if (entry.isDirectory()) {
-                // Skip ignored directories
-                if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) {
-                  continue
-                }
-                const shouldStop = await walkDir(fullPath)
-                if (shouldStop) return true
-              } else if (entry.isFile()) {
-                if (!matchesInclude(fullPath)) continue
-
-                const shouldStop = await searchFile(fullPath)
-                if (shouldStop) return true
+                if (GREP_IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
+                if (gitIgnoreMatcher && (await gitIgnoreMatcher.ignores(fullPath, true))) continue
+                if (await walkDir(fullPath)) return true
+                continue
               }
+
+              if (!entry.isFile() || !matchesInclude(fullPath)) continue
+              if (await searchFile(fullPath)) return true
             }
             return false
           } catch {
-            return false // Skip unreadable dirs
+            return false
           }
         }
 
-        const timedOut = targetStats.isDirectory()
-          ? await walkDir(searchTarget)
-          : matchesInclude(searchTarget)
-            ? await searchFile(searchTarget)
-            : false
+        if (targetStats.isDirectory()) {
+          await walkDir(searchTarget)
+        } else if (matchesInclude(searchTarget)) {
+          await searchFile(searchTarget)
+        }
 
         return {
-          results,
-          truncated: results.length >= MAX_RESULTS,
+          results: collector.results,
+          truncated: collector.truncated || timedOut,
           timedOut,
+          limitReason: timedOut ? 'timeout' : collector.limitReason,
           searchTime: Date.now() - startTime
         }
       } catch (err) {

@@ -2,7 +2,6 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useUIStore } from '@renderer/stores/ui-store'
-import { useShallow } from 'zustand/react/shallow'
 import { MessageItem } from './MessageItem'
 import { MessageSquare, Briefcase, Code2, RefreshCw, ArrowDown, Loader2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
@@ -38,6 +37,7 @@ interface MessageListProps {
 
 interface RenderableMessage {
   messageId: string
+  messageIndex: number
   isLastUserMessage: boolean
   toolResults?: Map<string, { content: ToolResultContent; isError?: boolean }>
 }
@@ -140,47 +140,33 @@ function buildRenderableMessageMeta(
 
 export function MessageList({ onRetry, onEditUserMessage }: MessageListProps): React.JSX.Element {
   const { t } = useTranslation('chat')
-  const { activeSessionId, streamingMessageId, activeSessionLoaded, activeSessionMessageCount, activeWorkingFolder } =
-    useChatStore(
-      useShallow((s) => {
-        const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
-        return {
-          activeSessionId: s.activeSessionId,
-          streamingMessageId: s.streamingMessageId,
-          activeSessionLoaded: activeSession?.messagesLoaded ?? true,
-          activeSessionMessageCount: activeSession?.messageCount ?? 0,
-          activeWorkingFolder: activeSession?.workingFolder
-        }
-      })
-    )
-  const messageIds = useChatStore(
-    useShallow((s) => {
-      const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
-      return activeSession?.messages.map((message) => message.id) ?? EMPTY_MESSAGE_IDS
-    })
+  const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const streamingMessageId = useChatStore((s) => s.streamingMessageId)
+  const activeSession = useChatStore((s) =>
+    s.sessions.find((session) => session.id === s.activeSessionId)
   )
   const mode = useUIStore((s) => s.mode)
   const scrollContainerRef = React.useRef<HTMLDivElement>(null)
   const bottomRef = React.useRef<HTMLDivElement>(null)
   const [isAtBottom, setIsAtBottom] = React.useState(true)
-  const isStreamingRef = React.useRef(false)
-  isStreamingRef.current = !!streamingMessageId
 
-  const messages = React.useMemo(
-    () => (activeSessionId ? useChatStore.getState().getSessionMessages(activeSessionId) : EMPTY_MESSAGES),
-    [activeSessionId, messageIds]
+  const activeSessionLoaded = activeSession?.messagesLoaded ?? true
+  const activeSessionMessageCount = activeSession?.messageCount ?? 0
+  const activeWorkingFolder = activeSession?.workingFolder
+  const messages = activeSession?.messages ?? EMPTY_MESSAGES
+  const messageIds = React.useMemo(
+    () => (messages.length > 0 ? messages.map((message) => message.id) : EMPTY_MESSAGE_IDS),
+    [messages]
   )
+
   React.useEffect(() => {
     if (!activeSessionId) return
     void useChatStore.getState().loadRecentSessionMessages(activeSessionId)
   }, [activeSessionId])
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const renderableMeta = React.useMemo(
-    () => buildRenderableMessageMeta(messages, streamingMessageId),
-    // Structural deps only: avoid re-running expensive content scan for each streaming text delta.
-    [activeSessionId, streamingMessageId, messageIds]
-  )
+  const renderableMeta = React.useMemo(() => {
+    return buildRenderableMessageMeta(messages, streamingMessageId)
+  }, [messages, streamingMessageId])
   const [visibleCount, setVisibleCount] = React.useState(INITIAL_VISIBLE_MESSAGE_COUNT)
   const visibleRenderableMeta = React.useMemo(() => {
     const startIndex = Math.max(0, renderableMeta.items.length - visibleCount)
@@ -193,13 +179,17 @@ export function MessageList({ onRetry, onEditUserMessage }: MessageListProps): R
       if (!message || isToolResultOnlyUserMessage(message)) continue
       result.push({
         messageId: message.id,
+        messageIndex: item.messageIndex,
         isLastUserMessage: item.isLastUserMessage,
         toolResults: item.toolResults
       })
     }
     return result
   }, [visibleRenderableMeta, messages])
-  const hiddenLoadedMessageCount = Math.max(0, renderableMeta.items.length - visibleRenderableMeta.length)
+  const hiddenLoadedMessageCount = Math.max(
+    0,
+    renderableMeta.items.length - visibleRenderableMeta.length
+  )
   const olderUnloadedMessageCount = Math.max(0, activeSessionMessageCount - messages.length)
   const hiddenMessageCount = hiddenLoadedMessageCount + olderUnloadedMessageCount
   const contentRef = React.useRef<HTMLDivElement>(null)
@@ -241,7 +231,7 @@ export function MessageList({ onRetry, onEditUserMessage }: MessageListProps): R
     const handleScroll = (): void => {
       const distanceFromBottom =
         container.scrollHeight - container.scrollTop - container.clientHeight
-      const threshold = isStreamingRef.current ? 150 : 5
+      const threshold = streamingMessageId ? 150 : 5
       const nextAtBottom = distanceFromBottom <= threshold
       setIsAtBottom((prev) => (prev === nextAtBottom ? prev : nextAtBottom))
     }
@@ -249,7 +239,7 @@ export function MessageList({ onRetry, onEditUserMessage }: MessageListProps): R
     handleScroll()
     container.addEventListener('scroll', handleScroll, { passive: true })
     return () => container.removeEventListener('scroll', handleScroll)
-  }, [activeSessionId])
+  }, [activeSessionId, streamingMessageId])
 
   // Auto-scroll to bottom on new messages, streaming content, and tool call state changes
   React.useEffect(() => {
@@ -257,7 +247,7 @@ export function MessageList({ onRetry, onEditUserMessage }: MessageListProps): R
     const container = scrollContainerRef.current
     if (!container) return
 
-    if (isStreamingRef.current) {
+    if (streamingMessageId) {
       container.scrollTop = container.scrollHeight
     } else {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -440,19 +430,21 @@ export function MessageList({ onRetry, onEditUserMessage }: MessageListProps): R
               </button>
             </div>
           )}
-          {visibleRenderableMessages.map(({ messageId, isLastUserMessage, toolResults }) => {
-            return (
-              <MessageItem
-                key={messageId}
-                sessionId={activeSessionId ?? ''}
-                messageId={messageId}
-                isStreaming={messageId === streamingMessageId}
-                isLastUserMessage={isLastUserMessage}
-                onEditUserMessage={onEditUserMessage}
-                toolResults={toolResults}
-              />
-            )
-          })}
+          {visibleRenderableMessages.map(
+            ({ messageId, messageIndex, isLastUserMessage, toolResults }) => {
+              return (
+                <MessageItem
+                  key={messageId}
+                  message={messages[messageIndex]!}
+                  messageId={messageId}
+                  isStreaming={messageId === streamingMessageId}
+                  isLastUserMessage={isLastUserMessage}
+                  onEditUserMessage={onEditUserMessage}
+                  toolResults={toolResults}
+                />
+              )
+            }
+          )}
           {!streamingMessageId && messageIds.length > 0 && hasAssistantMessages && onRetry && (
             <div className="flex justify-center">
               <Button

@@ -88,6 +88,43 @@ function getIpcError(result: unknown): string | null {
   return typeof error === 'string' && error.trim() ? error : null
 }
 
+function normalizeVersion(version: string | null | undefined): string {
+  return (version ?? '').trim().replace(/^v/i, '')
+}
+
+function compareVersions(left: string, right: string): number {
+  const leftParts = normalizeVersion(left).split('-')[0].split('.')
+  const rightParts = normalizeVersion(right).split('-')[0].split('.')
+  const length = Math.max(leftParts.length, rightParts.length)
+
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = Number.parseInt(leftParts[index] ?? '0', 10)
+    const rightValue = Number.parseInt(rightParts[index] ?? '0', 10)
+    const safeLeftValue = Number.isFinite(leftValue) ? leftValue : 0
+    const safeRightValue = Number.isFinite(rightValue) ? rightValue : 0
+
+    if (safeLeftValue !== safeRightValue) {
+      return safeLeftValue > safeRightValue ? 1 : -1
+    }
+  }
+
+  return 0
+}
+
+function isNewerVersion(
+  candidate: string | null | undefined,
+  current: string | null | undefined
+): boolean {
+  const normalizedCandidate = normalizeVersion(candidate)
+  const normalizedCurrent = normalizeVersion(current)
+
+  if (!normalizedCandidate || !normalizedCurrent) {
+    return false
+  }
+
+  return compareVersions(normalizedCandidate, normalizedCurrent) > 0
+}
+
 const menuGroupDefs: Array<{
   labelKey: string
   items: { id: SettingsTab; icon: React.ReactNode; labelKey: string; descKey: string }[]
@@ -181,7 +218,7 @@ function GeneralPanel(): React.JSX.Element {
   const settings = useSettingsStore()
   const { setTheme } = useTheme()
   const promptTokens = useDebouncedTokens(settings.systemPrompt)
-  const currentVersion = packageJson.version ?? '0.0.0'
+  const currentVersion = normalizeVersion(packageJson.version ?? '0.0.0')
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
@@ -239,7 +276,7 @@ function GeneralPanel(): React.JSX.Element {
         return
       }
 
-      setLatestVersion(result.latestVersion)
+      setLatestVersion(normalizeVersion(result.latestVersion))
     } catch (err) {
       setUpdateError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -251,12 +288,12 @@ function GeneralPanel(): React.JSX.Element {
     void checkForUpdates()
   }, [checkForUpdates])
 
-  const updateAvailable = Boolean(latestVersion && latestVersion !== currentVersion)
+  const updateAvailable = isNewerVersion(latestVersion, currentVersion)
 
   useEffect(() => {
     const offAvailable = ipcClient.on(IPC.UPDATE_AVAILABLE, (data: unknown) => {
       const d = data as { currentVersion: string; newVersion: string; releaseNotes: string }
-      setLatestVersion(d.newVersion)
+      setLatestVersion(normalizeVersion(d.newVersion))
       setUpdateError(null)
     })
 

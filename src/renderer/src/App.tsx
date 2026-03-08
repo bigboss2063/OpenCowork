@@ -1,8 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Layout } from './components/layout/Layout'
 import { Toaster } from './components/ui/sonner'
-import { ConfirmDialogProvider } from './components/ui/confirm-dialog'
+import { confirm, ConfirmDialogProvider } from './components/ui/confirm-dialog'
 import { ThemeProvider } from './components/theme-provider'
 import { ErrorBoundary } from './components/error-boundary'
 import { useSettingsStore } from './stores/settings-store'
@@ -26,7 +26,6 @@ import { runCronAgent } from './lib/tools/cron-agent-runner'
 import { useChatStore as _useChatStore } from './stores/chat-store'
 import { nanoid } from 'nanoid'
 import type { UnifiedMessage } from './lib/api/types'
-import { useNotifyStore } from './stores/notify-store'
 import { NotifyToastContainer } from './components/notify/NotifyWindow'
 import {
   getGlobalMemorySnapshot,
@@ -49,6 +48,29 @@ initChannelEventListener()
 
 const GLOBAL_MEMORY_REMINDER_MARKER = '[global-memory-update]'
 const globalMemoryVersionBySession = new Map<string, number>()
+
+function normalizeVersion(version: string | null | undefined): string {
+  return (version ?? '').trim().replace(/^v/i, '')
+}
+
+function compareVersions(left: string, right: string): number {
+  const leftParts = normalizeVersion(left).split('-')[0].split('.')
+  const rightParts = normalizeVersion(right).split('-')[0].split('.')
+  const length = Math.max(leftParts.length, rightParts.length)
+
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = Number.parseInt(leftParts[index] ?? '0', 10)
+    const rightValue = Number.parseInt(rightParts[index] ?? '0', 10)
+    const safeLeftValue = Number.isFinite(leftValue) ? leftValue : 0
+    const safeRightValue = Number.isFinite(rightValue) ? rightValue : 0
+
+    if (safeLeftValue !== safeRightValue) {
+      return safeLeftValue > safeRightValue ? 1 : -1
+    }
+  }
+
+  return 0
+}
 
 function buildGlobalMemoryReminder(snapshot: GlobalMemorySnapshot): string {
   const pathLabel = snapshot.path ? `\`${snapshot.path}\`` : 'path unavailable'
@@ -97,6 +119,9 @@ function App(): React.JSX.Element {
   const fontFamily = useSettingsStore((s) => s.fontFamily)
   const fontSize = useSettingsStore((s) => s.fontSize)
   const { t } = useTranslation('common')
+  const shownUpdateVersionsRef = useRef(new Set<string>())
+  const updateDialogOpenRef = useRef(false)
+  const updateDownloadPendingRef = useRef(false)
 
   // Initialize plugin auto-reply agent loop listener
   usePluginAutoReply()
@@ -308,40 +333,68 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const offUpdateAvailable = ipcClient.on('update:available', (data: unknown) => {
       const d = data as { currentVersion: string; newVersion: string; releaseNotes: string }
-      console.log('[App] Update available:', d)
+      const currentVersion = normalizeVersion(d.currentVersion)
+      const newVersion = normalizeVersion(d.newVersion)
 
-      useNotifyStore
-        .getState()
-        .push(
-          t('app.update.availableTitle', { version: d.newVersion }),
-          d.releaseNotes || t('app.update.availableDescription'),
-          {
-            type: 'info',
-            persistent: true,
-            actions: [
-              {
-                label: t('app.update.actions.updateNow'),
-                onClick: async () => {
-                  toast.info(t('app.update.downloading'))
-                  const result = await window.electron.ipcRenderer.invoke('update:download')
-                  if (!result.success) {
-                    toast.error(t('app.update.downloadFailed'), { description: result.error })
-                  }
-                }
-              },
-              {
-                label: t('app.update.actions.remindLater'),
-                onClick: () => {
-                  toast.info(t('app.update.delayed'))
-                }
-              }
-            ]
-          }
+      if (compareVersions(newVersion, currentVersion) <= 0) {
+        console.log(
+          `[App] Ignore non-newer update dialog: current=${currentVersion}, latest=${newVersion}`
         )
+        return
+      }
+
+      if (shownUpdateVersionsRef.current.has(newVersion)) {
+        console.log(`[App] Ignore duplicate update dialog for version ${newVersion}`)
+        return
+      }
+
+      if (updateDialogOpenRef.current) {
+        console.log('[App] Update dialog already open, ignore repeated trigger')
+        return
+      }
+
+      shownUpdateVersionsRef.current.add(newVersion)
+      updateDialogOpenRef.current = true
+
+      void (async () => {
+        try {
+          const confirmed = await confirm({
+            title: t('app.update.availableTitle', { version: newVersion }),
+            description: d.releaseNotes || t('app.update.availableDescription'),
+            confirmLabel: t('app.update.actions.updateNow'),
+            cancelLabel: t('app.update.actions.remindLater')
+          })
+
+          if (!confirmed) {
+            toast.info(t('app.update.delayed'))
+            return
+          }
+
+          if (updateDownloadPendingRef.current) {
+            console.log('[App] Update download already pending, ignore repeated confirm')
+            return
+          }
+
+          updateDownloadPendingRef.current = true
+          toast.info(t('app.update.downloading'))
+
+          const result = (await window.electron.ipcRenderer.invoke('update:download')) as
+            | { success: true }
+            | { success: false; error: string }
+
+          if (!result.success) {
+            updateDownloadPendingRef.current = false
+            toast.error(t('app.update.downloadFailed'), { description: result.error })
+          }
+        } finally {
+          updateDialogOpenRef.current = false
+        }
+      })()
     })
 
     const offUpdateDownloaded = ipcClient.on('update:downloaded', (data: unknown) => {
       const d = data as { version: string }
+      updateDownloadPendingRef.current = false
       toast.success(t('app.update.downloadedTitle'), {
         description: t('app.update.downloadedDescription', { version: d.version })
       })
@@ -349,6 +402,7 @@ function App(): React.JSX.Element {
 
     const offUpdateError = ipcClient.on('update:error', (data: unknown) => {
       const d = data as { error: string }
+      updateDownloadPendingRef.current = false
       toast.error(t('app.update.failed'), { description: d.error })
     })
 

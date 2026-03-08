@@ -1,10 +1,7 @@
 import { Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@renderer/components/ui/button'
-import {
-  useUIStore,
-  type RightPanelTab,
-} from '@renderer/stores/ui-store'
+import { useUIStore, type RightPanelTab } from '@renderer/stores/ui-store'
 import { StepsPanel } from '@renderer/components/cowork/StepsPanel'
 import { ArtifactsPanel } from '@renderer/components/cowork/ArtifactsPanel'
 import { ContextPanel } from '@renderer/components/cowork/ContextPanel'
@@ -27,12 +24,12 @@ import {
   RIGHT_PANEL_DEFAULT_WIDTH,
   RIGHT_PANEL_SECTION_DEFS,
   RIGHT_PANEL_TAB_DEFS,
-  clampRightPanelWidth,
+  clampRightPanelWidth
 } from './right-panel-defs'
 
 function SshFilesPanel({
   connectionId,
-  rootPath,
+  rootPath
 }: {
   connectionId: string
   rootPath?: string
@@ -102,7 +99,7 @@ function SshFilesPanel({
     connectionId,
     error,
     errorSession,
-    t,
+    t
   ])
 
   if (connectedSession) {
@@ -174,9 +171,9 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
 
   const visibleTabs = useMemo(
     () =>
-      RIGHT_PANEL_TAB_DEFS
-        .filter((item) => teamToolsEnabled || item.value !== 'team')
-        .filter((item) => (hasPlan || planMode) || item.value !== 'plan'),
+      RIGHT_PANEL_TAB_DEFS.filter((item) => teamToolsEnabled || item.value !== 'team').filter(
+        (item) => hasPlan || planMode || item.value !== 'plan'
+      ),
     [teamToolsEnabled, hasPlan, planMode]
   )
 
@@ -207,7 +204,9 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
   const startWidthRef = useRef(rightPanelWidth)
   const [isDragging, setIsDragging] = useState(false)
 
-  const targetPanelWidth = compact ? Math.min(rightPanelWidth, RIGHT_PANEL_DEFAULT_WIDTH) : rightPanelWidth
+  const targetPanelWidth = compact
+    ? Math.min(rightPanelWidth, RIGHT_PANEL_DEFAULT_WIDTH)
+    : rightPanelWidth
   const computedPanelWidth = rightPanelOpen ? targetPanelWidth : 0
 
   // Ensure rightPanelWidth has a valid initial value if it's somehow 0
@@ -278,7 +277,7 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
       style={{ width: computedPanelWidth }}
     >
       {/* Floating Toggle Button & Hover Menu Wrapper */}
-      <div 
+      <div
         className="absolute left-0 top-1/2 -translate-x-full -translate-y-1/2 z-50 flex items-center"
         onMouseEnter={handleButtonMouseEnter}
         onMouseLeave={handleButtonMouseLeave}
@@ -312,13 +311,21 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
         <button
           onClick={() => setRightPanelOpen(!rightPanelOpen)}
           className={cn(
-            "w-5 h-14 bg-background border border-border/50 border-r-0",
-            "rounded-l-xl flex items-center justify-center",
-            "text-muted-foreground hover:text-foreground hover:bg-muted/50 cursor-pointer shadow-sm transition-all duration-300"
+            'w-5 h-14 bg-background border border-border/50 border-r-0',
+            'rounded-l-xl flex items-center justify-center',
+            'text-muted-foreground hover:text-foreground hover:bg-muted/50 cursor-pointer shadow-sm transition-all duration-300'
           )}
-          title={rightPanelOpen ? t('rightPanelAction.closePanel', { defaultValue: '收起面板' }) : t('rightPanelAction.expandPanel', { defaultValue: '展开面板' })}
+          title={
+            rightPanelOpen
+              ? t('rightPanelAction.closePanel', { defaultValue: '收起面板' })
+              : t('rightPanelAction.expandPanel', { defaultValue: '展开面板' })
+          }
         >
-          {rightPanelOpen ? <ChevronRight className="size-4" /> : <ChevronLeft className="size-4" />}
+          {rightPanelOpen ? (
+            <ChevronRight className="size-4" />
+          ) : (
+            <ChevronLeft className="size-4" />
+          )}
         </button>
       </div>
 
@@ -333,10 +340,14 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
       {isDragging && <div className="absolute inset-0 z-30" />}
 
       {/* Clipping Wrapper for smooth slide animation */}
-      <div className={cn(
-        "absolute inset-0 overflow-hidden bg-background shadow-2xl transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]",
-        rightPanelOpen ? "border-l border-border/50 rounded-l-2xl opacity-100" : "border-l-0 rounded-none opacity-0"
-      )}>
+      <div
+        className={cn(
+          'absolute inset-0 overflow-hidden bg-background shadow-2xl transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]',
+          rightPanelOpen
+            ? 'border-l border-border/50 rounded-l-2xl opacity-100'
+            : 'border-l-0 rounded-none opacity-0'
+        )}
+      >
         {/* Fixed Width Content */}
         <div
           className="absolute right-0 top-0 h-full bg-background"

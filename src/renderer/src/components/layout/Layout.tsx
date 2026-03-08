@@ -1,12 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MessageSquare, Briefcase, Code2, ClipboardCopy, Check, ImageDown, Loader2, PanelLeftOpen, FolderOpen, Monitor, Server, Pencil } from 'lucide-react'
+import {
+  MessageSquare,
+  Briefcase,
+  Code2,
+  ClipboardCopy,
+  Check,
+  ImageDown,
+  Loader2,
+  PanelLeftOpen,
+  FolderOpen,
+  Monitor,
+  Server,
+  Pencil
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useTheme } from 'next-themes'
 import { confirm } from '@renderer/components/ui/confirm-dialog'
 import { Button } from '@renderer/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@renderer/components/ui/dialog'
 import { Input } from '@renderer/components/ui/input'
-import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@renderer/components/ui/tooltip'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+  TooltipProvider
+} from '@renderer/components/ui/tooltip'
 import { cn } from '@renderer/lib/utils'
 import { TitleBar } from './TitleBar'
 import { NavRail } from './NavRail'
@@ -43,7 +61,7 @@ import { useShallow } from 'zustand/react/shallow'
 const modes: { value: AppMode; labelKey: string; icon: React.ReactNode }[] = [
   { value: 'chat', labelKey: 'mode.chat', icon: <MessageSquare className="size-3.5" /> },
   { value: 'cowork', labelKey: 'mode.cowork', icon: <Briefcase className="size-3.5" /> },
-  { value: 'code', labelKey: 'mode.code', icon: <Code2 className="size-3.5" /> },
+  { value: 'code', labelKey: 'mode.code', icon: <Code2 className="size-3.5" /> }
 ]
 const DEFAULT_SSH_WORKDIR = ''
 
@@ -86,7 +104,7 @@ export function Layout(): React.JSX.Element {
         activeSessionTitle: activeSession?.title,
         activeSessionMode: activeSession?.mode as SessionMode | undefined,
         activeWorkingFolder: activeProject?.workingFolder,
-        activeSessionSshConnectionId: activeProject?.sshConnectionId,
+        activeSessionSshConnectionId: activeProject?.sshConnectionId
       }
     })
   )
@@ -94,7 +112,8 @@ export function Layout(): React.JSX.Element {
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const streamingMessageId = useChatStore((s) => s.streamingMessageId)
   const isStreaming = !!streamingMessageId
-  const pendingToolCalls = useAgentStore((s) => s.pendingToolCalls)
+  const pendingToolCallCount = useAgentStore((s) => s.pendingToolCalls.length)
+  const pendingApproval = useAgentStore((s) => s.pendingToolCalls[0] ?? null)
   const resolveApproval = useAgentStore((s) => s.resolveApproval)
   const initBackgroundProcessTracking = useAgentStore((s) => s.initBackgroundProcessTracking)
 
@@ -111,15 +130,22 @@ export function Layout(): React.JSX.Element {
   const [sshDirInputs, setSshDirInputs] = useState<Record<string, string>>({})
   const [sshDirEditingId, setSshDirEditingId] = useState<string | null>(null)
 
-  const activeSubAgents = useAgentStore((s) => s.activeSubAgents)
-  const runningSubAgents = Object.values(activeSubAgents).filter((sa) => sa.isRunning)
+  const runningSubAgentNamesSig = useAgentStore((s) => s.runningSubAgentNamesSig)
+  const runningSubAgentCount = runningSubAgentNamesSig
+    ? runningSubAgentNamesSig.split('\u0000').length
+    : 0
+  const runningSubAgentLabel = runningSubAgentNamesSig
+    ? runningSubAgentNamesSig.split('\u0000').join(', ')
+    : ''
 
   const loadDesktopDirectories = useCallback(async (): Promise<void> => {
     if (mode === 'chat') return
 
     setDesktopDirectoriesLoading(true)
     try {
-      const result = (await ipcClient.invoke('fs:list-desktop-directories')) as DesktopDirectoryResult
+      const result = (await ipcClient.invoke(
+        'fs:list-desktop-directories'
+      )) as DesktopDirectoryResult
       if ('error' in result || !Array.isArray(result.directories)) {
         setDesktopDirectories([])
         return
@@ -161,25 +187,35 @@ export function Layout(): React.JSX.Element {
 
   // Update window title (show pending approvals + streaming state + SubAgent)
   useEffect(() => {
-    const base = activeSessionTitle
-      ? `${activeSessionTitle} — OpenCowork`
-      : 'OpenCowork'
-    const prefix = pendingToolCalls.length > 0
-      ? `(${pendingToolCalls.length} pending) `
-      : runningSubAgents.length > 0
-        ? `🧠 ${runningSubAgents.map((sa) => sa.name).join(', ')} | `
-        : streamingMessageId
-          ? '⏳ '
-          : ''
+    const base = activeSessionTitle ? `${activeSessionTitle} — OpenCowork` : 'OpenCowork'
+    const prefix =
+      pendingToolCallCount > 0
+        ? `(${pendingToolCallCount} pending) `
+        : runningSubAgentCount > 0
+          ? `🧠 ${runningSubAgentLabel} | `
+          : streamingMessageId
+            ? '⏳ '
+            : ''
     document.title = `${prefix}${base}`
-  }, [activeSessionTitle, pendingToolCalls.length, streamingMessageId, runningSubAgents])
+  }, [
+    activeSessionTitle,
+    pendingToolCallCount,
+    streamingMessageId,
+    runningSubAgentCount,
+    runningSubAgentLabel,
+    runningSubAgentNamesSig
+  ])
 
   // Sync UI mode only when session info changes, so manual top-bar toggles are respected
   useEffect(() => {
     if (!activeSessionMode) return
     const currentMode = useUIStore.getState().mode
     if (currentMode !== activeSessionMode) {
-      useUIStore.getState().setMode(activeSessionMode)
+      queueMicrotask(() => {
+        if (useUIStore.getState().mode !== activeSessionMode) {
+          useUIStore.getState().setMode(activeSessionMode)
+        }
+      })
     }
   }, [activeSessionId, activeSessionMode])
 
@@ -194,7 +230,6 @@ export function Layout(): React.JSX.Element {
     }
   }, [activeSessionId])
 
-  const pendingApproval = pendingToolCalls[0] ?? null
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen)
   const settingsPageOpen = useUIStore((s) => s.settingsPageOpen)
   const skillsPageOpen = useUIStore((s) => s.skillsPageOpen)
@@ -258,9 +293,12 @@ export function Layout(): React.JSX.Element {
       if ((e.metaKey || e.ctrlKey) && e.key === 'l') {
         e.preventDefault()
         if (activeSessionId) {
-          const session = useChatStore.getState().sessions.find((s) => s.id === activeSessionId)
+          const session = getActiveSessionSnapshot()
           if (session && session.messageCount > 0) {
-            const ok = await confirm({ title: t('layout.clearConfirm', { count: session.messageCount }), variant: 'destructive' })
+            const ok = await confirm({
+              title: t('layout.clearConfirm', { count: session.messageCount }),
+              variant: 'destructive'
+            })
             if (!ok) return
           }
           useChatStore.getState().clearSessionMessages(activeSessionId)
@@ -279,7 +317,7 @@ export function Layout(): React.JSX.Element {
       if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
         e.preventDefault()
         if (activeSessionId) {
-          const session = useChatStore.getState().sessions.find((s) => s.id === activeSessionId)
+          const session = getActiveSessionSnapshot()
           useChatStore.getState().togglePinSession(activeSessionId)
           toast.success(session?.pinned ? t('layout.unpinned') : t('layout.pinned'))
         }
@@ -295,7 +333,10 @@ export function Layout(): React.JSX.Element {
         })
         if (sorted.length < 2) return
         const idx = sorted.findIndex((s) => s.id === store.activeSessionId)
-        const next = e.key === 'ArrowDown' ? (idx + 1) % sorted.length : (idx - 1 + sorted.length) % sorted.length
+        const next =
+          e.key === 'ArrowDown'
+            ? (idx + 1) % sorted.length
+            : (idx - 1 + sorted.length) % sorted.length
         store.setActiveSession(sorted[next].id)
       }
       // Ctrl+Home/End: Scroll to top/bottom of messages
@@ -303,7 +344,10 @@ export function Layout(): React.JSX.Element {
         e.preventDefault()
         const container = document.querySelector('.overflow-y-auto')
         if (container) {
-          container.scrollTo({ top: e.key === 'Home' ? 0 : container.scrollHeight, behavior: 'smooth' })
+          container.scrollTo({
+            top: e.key === 'Home' ? 0 : container.scrollHeight,
+            behavior: 'smooth'
+          })
         }
       }
       // Escape: Stop streaming
@@ -347,7 +391,10 @@ export function Layout(): React.JSX.Element {
         const store = useChatStore.getState()
         const count = store.sessions.length
         if (count > 0) {
-          const ok = await confirm({ title: t('layout.deleteAllConfirm', { count }), variant: 'destructive' })
+          const ok = await confirm({
+            title: t('layout.deleteAllConfirm', { count }),
+            variant: 'destructive'
+          })
           if (!ok) return
           store.clearAllSessions()
           toast.success(t('layout.deletedSessions', { count }))
@@ -357,8 +404,13 @@ export function Layout(): React.JSX.Element {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
         e.preventDefault()
         const ui = useUIStore.getState()
-        if (!ui.rightPanelOpen) { ui.setRightPanelOpen(true); return }
-        const tabs: Array<'steps' | 'plan' | 'team' | 'files' | 'artifacts' | 'context' | 'skills' | 'cron'> = ['steps', 'plan', 'team', 'files', 'artifacts', 'context', 'skills', 'cron']
+        if (!ui.rightPanelOpen) {
+          ui.setRightPanelOpen(true)
+          return
+        }
+        const tabs: Array<
+          'steps' | 'plan' | 'team' | 'files' | 'artifacts' | 'context' | 'skills' | 'cron'
+        > = ['steps', 'plan', 'team', 'files', 'artifacts', 'context', 'skills', 'cron']
         const idx = tabs.indexOf(ui.rightPanelTab)
         ui.setRightPanelTab(tabs[(idx + 1) % tabs.length])
         return
@@ -403,7 +455,9 @@ export function Layout(): React.JSX.Element {
               toast.info(t('layout.noNewSessions'))
             }
           } catch (err) {
-            toast.error(t('layout.importFailed', { error: err instanceof Error ? err.message : String(err) }))
+            toast.error(
+              t('layout.importFailed', { error: err instanceof Error ? err.message : String(err) })
+            )
           }
         }
         input.click()
@@ -413,7 +467,10 @@ export function Layout(): React.JSX.Element {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'S' || e.key === 's')) {
         e.preventDefault()
         const allSessions = useChatStore.getState().sessions
-        if (allSessions.length === 0) { toast.error(t('layout.noSessionsToBackup')); return }
+        if (allSessions.length === 0) {
+          toast.error(t('layout.noSessionsToBackup'))
+          return
+        }
         await Promise.all(allSessions.map((s) => useChatStore.getState().loadSessionMessages(s.id)))
         const latestSessions = useChatStore.getState().sessions
         const json = JSON.stringify(latestSessions, null, 2)
@@ -436,7 +493,11 @@ export function Layout(): React.JSX.Element {
         const session = useChatStore.getState().sessions.find((s) => s.id === activeSessionId)
         if (session && session.messageCount > 0) {
           const md = sessionToMarkdown(session)
-          const filename = session.title.replace(/[^a-zA-Z0-9-_ ]/g, '').slice(0, 50).trim() || 'conversation'
+          const filename =
+            session.title
+              .replace(/[^a-zA-Z0-9-_ ]/g, '')
+              .slice(0, 50)
+              .trim() || 'conversation'
           const blob = new Blob([md], { type: 'text/markdown' })
           const url = URL.createObjectURL(blob)
           const a = document.createElement('a')
@@ -450,7 +511,17 @@ export function Layout(): React.JSX.Element {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [mode, setSettingsOpen, toggleLeftSidebar, activeSessionId])
+  }, [
+    mode,
+    setSettingsOpen,
+    toggleLeftSidebar,
+    activeSessionId,
+    ntSetTheme,
+    resolvedTheme,
+    stopStreaming,
+    streamingMessageId,
+    t
+  ])
 
   const resolveActiveProjectId = async (): Promise<string | null> => {
     const chatStore = useChatStore.getState()
@@ -468,6 +539,11 @@ export function Layout(): React.JSX.Element {
     chatStore.updateProjectDirectory(projectId, patch)
   }
 
+  const getActiveSessionSnapshot = ():
+    | ReturnType<typeof useChatStore.getState>['sessions'][number]
+    | undefined =>
+    useChatStore.getState().sessions.find((session) => session.id === activeSessionId)
+
   const handleOpenFolderDialog = (): void => {
     setFolderDialogOpen(true)
     void loadDesktopDirectories()
@@ -477,19 +553,22 @@ export function Layout(): React.JSX.Element {
   const handleSelectDesktopFolder = (folderPath: string): void => {
     void updateActiveProjectDirectory({
       workingFolder: folderPath,
-      sshConnectionId: null,
+      sshConnectionId: null
     })
     setFolderDialogOpen(false)
   }
 
   const handleSelectOtherFolder = async (): Promise<void> => {
-    const result = (await ipcClient.invoke('fs:select-folder')) as { canceled?: boolean; path?: string }
+    const result = (await ipcClient.invoke('fs:select-folder')) as {
+      canceled?: boolean
+      path?: string
+    }
     if (result.canceled || !result.path) {
       return
     }
     await updateActiveProjectDirectory({
       workingFolder: result.path,
-      sshConnectionId: null,
+      sshConnectionId: null
     })
     setFolderDialogOpen(false)
   }
@@ -500,7 +579,7 @@ export function Layout(): React.JSX.Element {
     const dir = sshDirInputs[connId]?.trim() || conn.defaultDirectory || DEFAULT_SSH_WORKDIR
     void updateActiveProjectDirectory({
       workingFolder: dir,
-      sshConnectionId: connId,
+      sshConnectionId: connId
     })
     setSshDirEditingId(null)
     setFolderDialogOpen(false)
@@ -552,7 +631,9 @@ export function Layout(): React.JSX.Element {
       // Wait for reflow so the browser applies the injected styles
       await new Promise<void>((r) => requestAnimationFrame(() => r()))
 
-      const bgRaw = getComputedStyle(document.documentElement).getPropertyValue('--background').trim()
+      const bgRaw = getComputedStyle(document.documentElement)
+        .getPropertyValue('--background')
+        .trim()
       const bgColor = bgRaw ? `hsl(${bgRaw})` : '#ffffff'
       const { toPng } = await import('html-to-image')
       const captureWidth = node.clientWidth
@@ -563,8 +644,8 @@ export function Layout(): React.JSX.Element {
         style: {
           overflow: 'hidden',
           maxWidth: `${captureWidth}px`,
-          width: `${captureWidth}px`,
-        },
+          width: `${captureWidth}px`
+        }
       })
 
       const base64 = dataUrl.split(',')[1]
@@ -578,7 +659,9 @@ export function Layout(): React.JSX.Element {
       toast.success(t('layout.imageCopied', { defaultValue: 'Image copied to clipboard' }))
     } catch (err) {
       console.error('Export image failed:', err)
-      toast.error(t('layout.exportImageFailed', { defaultValue: 'Export image failed' }), { description: String(err) })
+      toast.error(t('layout.exportImageFailed', { defaultValue: 'Export image failed' }), {
+        description: String(err)
+      })
     } finally {
       document.head.removeChild(styleEl)
       setExporting(false)
@@ -619,387 +702,478 @@ export function Layout(): React.JSX.Element {
 
             {/* Main content area (hidden when SSH page is active) */}
             {!sshPageOpen && (
-            <AnimatePresence mode="wait">
-              {skillsPageOpen ? (
-                <PageTransition key="skills-page" className="flex-1 min-w-0 bg-background overflow-hidden">
-                  <SkillsPage />
-                </PageTransition>
-              ) : settingsPageOpen ? (
-                <PageTransition key="settings-page" className="flex-1 min-w-0 bg-background overflow-hidden">
-                  <SettingsPage />
-                </PageTransition>
-              ) : translatePageOpen ? (
-                <PageTransition key="translate-page" className="flex-1 min-w-0 bg-background overflow-hidden">
-                  <TranslatePage />
-                </PageTransition>
-              ) : chatView === 'home' ? (
-                <PageTransition key="chat-home" className="flex flex-1 min-w-0 flex-col overflow-hidden">
-                  <ChatHomePage />
-                </PageTransition>
-              ) : (
-                <PageTransition key="main-layout" className="flex flex-1 min-w-0 flex-col overflow-hidden">
-                  <ErrorBoundary renderFallback={(error, reset) => (
-                    <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center overflow-hidden">
-                      <div className="flex size-12 items-center justify-center rounded-full bg-destructive/10">
-                        <svg className="size-6 text-destructive" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-                        </svg>
-                      </div>
-                      <div className="space-y-1">
-                        <h3 className="text-sm font-semibold text-foreground">{t('layout.somethingWentWrong')}</h3>
-                        <p className="max-w-md text-xs text-muted-foreground">{error?.message || t('layout.unexpectedError')}</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-                          onClick={reset}
-                        >
-                          {t('layout.tryAgain')}
-                        </button>
-                        <button
-                          className="rounded-md border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                          onClick={() => window.location.reload()}
-                        >
-                          {t('layout.reloadApp')}
-                        </button>
-                        <button
-                          className="rounded-md border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                          onClick={() => {
-                            const text = `Error: ${error?.message}\nStack: ${error?.stack}`
-                            navigator.clipboard.writeText(text)
-                          }}
-                        >
-                          {t('layout.copyError')}
-                        </button>
-                      </div>
-                      {error?.stack && (
-                        <details className="w-full max-w-lg text-left">
-                          <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground transition-colors">{t('layout.errorDetails')}</summary>
-                          <pre className="mt-1 max-h-32 overflow-auto rounded-md bg-muted p-2 text-[10px] leading-relaxed text-muted-foreground">{error.stack}</pre>
-                        </details>
+              <AnimatePresence mode="wait">
+                {skillsPageOpen ? (
+                  <PageTransition
+                    key="skills-page"
+                    className="flex-1 min-w-0 bg-background overflow-hidden"
+                  >
+                    <SkillsPage />
+                  </PageTransition>
+                ) : settingsPageOpen ? (
+                  <PageTransition
+                    key="settings-page"
+                    className="flex-1 min-w-0 bg-background overflow-hidden"
+                  >
+                    <SettingsPage />
+                  </PageTransition>
+                ) : translatePageOpen ? (
+                  <PageTransition
+                    key="translate-page"
+                    className="flex-1 min-w-0 bg-background overflow-hidden"
+                  >
+                    <TranslatePage />
+                  </PageTransition>
+                ) : chatView === 'home' ? (
+                  <PageTransition
+                    key="chat-home"
+                    className="flex flex-1 min-w-0 flex-col overflow-hidden"
+                  >
+                    <ChatHomePage />
+                  </PageTransition>
+                ) : (
+                  <PageTransition
+                    key="main-layout"
+                    className="flex flex-1 min-w-0 flex-col overflow-hidden"
+                  >
+                    <ErrorBoundary
+                      renderFallback={(error, reset) => (
+                        <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center overflow-hidden">
+                          <div className="flex size-12 items-center justify-center rounded-full bg-destructive/10">
+                            <svg
+                              className="size-6 text-destructive"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                              strokeWidth={2}
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"
+                              />
+                            </svg>
+                          </div>
+                          <div className="space-y-1">
+                            <h3 className="text-sm font-semibold text-foreground">
+                              {t('layout.somethingWentWrong')}
+                            </h3>
+                            <p className="max-w-md text-xs text-muted-foreground">
+                              {error?.message || t('layout.unexpectedError')}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                              onClick={reset}
+                            >
+                              {t('layout.tryAgain')}
+                            </button>
+                            <button
+                              className="rounded-md border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                              onClick={() => window.location.reload()}
+                            >
+                              {t('layout.reloadApp')}
+                            </button>
+                            <button
+                              className="rounded-md border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                              onClick={() => {
+                                const text = `Error: ${error?.message}\nStack: ${error?.stack}`
+                                navigator.clipboard.writeText(text)
+                              }}
+                            >
+                              {t('layout.copyError')}
+                            </button>
+                          </div>
+                          {error?.stack && (
+                            <details className="w-full max-w-lg text-left">
+                              <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground transition-colors">
+                                {t('layout.errorDetails')}
+                              </summary>
+                              <pre className="mt-1 max-h-32 overflow-auto rounded-md bg-muted p-2 text-[10px] leading-relaxed text-muted-foreground">
+                                {error.stack}
+                              </pre>
+                            </details>
+                          )}
+                        </div>
                       )}
-                    </div>
-                  )}>
-                  <div className="flex flex-1 overflow-hidden">
-                    {/* Center: Chat Area */}
-                    <div
-                      className="flex min-w-0 flex-1 flex-col bg-gradient-to-b from-background to-muted/20"
                     >
-                      {/* Mode selector toolbar */}
-                      <div className="flex shrink-0 items-center gap-2 px-3 py-2">
-                        {!leftSidebarOpen && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="size-7 shrink-0"
-                                onClick={toggleLeftSidebar}
-                              >
-                                <PanelLeftOpen className="size-4" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>{t('layout.expandSidebar', { defaultValue: 'Expand sidebar' })}</TooltipContent>
-                          </Tooltip>
-                        )}
-                        <div className="flex items-center gap-0.5 rounded-lg bg-background/95 backdrop-blur-sm p-0.5 shadow-md border border-border/50">
-                          {modes.map((m, i) => (
-                            <Tooltip key={m.value}>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  variant={mode === m.value ? 'secondary' : 'ghost'}
-                                  size="sm"
-                                  className={cn(
-                                    'h-6 gap-1.5 rounded-md px-2.5 text-xs font-medium transition-all duration-200',
-                                    mode === m.value
-                                      ? 'bg-background shadow-sm ring-1 ring-border/50'
-                                      : 'text-muted-foreground hover:text-foreground'
-                                  )}
-                                  onClick={() => setMode(m.value)}
-                                >
-                                  {m.icon}
-                                  {tCommon(m.labelKey)}
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>{tCommon(m.labelKey)} (Ctrl+{i + 1})</TooltipContent>
-                            </Tooltip>
-                          ))}
-                        </div>
-                        <div className="flex-1" />
-                        <div className="flex items-center gap-0.5 rounded-lg border bg-background/80 backdrop-blur-sm shadow-sm px-0.5 py-0.5">
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                className="group/btn flex h-6 items-center gap-1 rounded-md px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200 disabled:opacity-50"
-                                onClick={() => void handleExportImage()}
-                                disabled={exporting || isStreaming}
-                              >
-                                {exporting ? <Loader2 className="size-3.5 shrink-0 animate-spin" /> : <ImageDown className="size-3.5 shrink-0" />}
-                                <span
-                                  className="max-w-0 overflow-hidden pl-0 text-[10px] opacity-0 whitespace-nowrap group-hover/btn:max-w-[140px] group-hover/btn:pl-1 group-hover/btn:opacity-100"
-                                  style={{ transition: 'max-width 220ms cubic-bezier(0.4, 0, 0.2, 1), opacity 160ms ease, padding 180ms ease' }}
-                                >
-                                  {exporting ? t('layout.exporting', { defaultValue: 'Exporting...' }) : t('layout.exportImage', { defaultValue: 'Copy as image' })}
-                                </span>
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent>{t('layout.exportImage', { defaultValue: 'Copy as image' })}</TooltipContent>
-                          </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                className="group/btn flex h-6 items-center gap-1 rounded-md px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200 disabled:opacity-50"
-                                onClick={handleCopyAll}
-                                disabled={isStreaming}
-                              >
-                                {copiedAll ? <Check className="size-3.5 shrink-0" /> : <ClipboardCopy className="size-3.5 shrink-0" />}
-                                <span
-                                  className="max-w-0 overflow-hidden pl-0 text-[10px] opacity-0 whitespace-nowrap group-hover/btn:max-w-[140px] group-hover/btn:pl-1 group-hover/btn:opacity-100"
-                                  style={{ transition: 'max-width 220ms cubic-bezier(0.4, 0, 0.2, 1), opacity 160ms ease, padding 180ms ease' }}
-                                >
-                                  {copiedAll ? t('layout.copied', { defaultValue: 'Copied' }) : t('layout.copyAll', { defaultValue: 'Copy conversation' })}
-                                </span>
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent>{t('layout.copyAll', { defaultValue: 'Copy conversation' })}</TooltipContent>
-                          </Tooltip>
-                        </div>
-                      </div>
-                      <MessageList onRetry={retryLastMessage} onEditUserMessage={editAndResend} />
-                      <InputArea
-                        onSend={sendMessage}
-                        onStop={stopStreaming}
-                        onSelectFolder={mode !== 'chat' ? handleOpenFolderDialog : undefined}
-                        workingFolder={activeWorkingFolder}
-                        hideWorkingFolderIndicator
-                        isStreaming={isStreaming}
-                      />
-                      {mode !== 'chat' && (
-                        <Dialog open={folderDialogOpen} onOpenChange={setFolderDialogOpen}>
-                          <DialogContent className="p-4 sm:max-w-2xl">
-                            <DialogHeader>
-                              <DialogTitle className="text-sm">
-                                {tChat('input.desktopFolders', { defaultValue: 'Desktop folders' })}
-                              </DialogTitle>
-                            </DialogHeader>
-
-                            <div className="-mt-1 rounded-xl border bg-background/60 p-3">
-                              <div className="mb-2 rounded-md border border-border/60 bg-muted/20 px-2 py-1.5">
-                                <p className="text-[10px] text-muted-foreground/70">
-                                  {tChat('input.currentWorkingFolder', {
-                                    defaultValue: 'Current working folder'
-                                  })}
-                                </p>
-                                <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                                  <FolderOpen className="size-3 shrink-0" />
-                                  <span className="truncate">
-                                    {activeWorkingFolder ??
-                                      tChat('input.noWorkingFolderSelected', {
-                                        defaultValue: 'No folder selected'
-                                      })}
-                                  </span>
-                                </div>
-                              </div>
-
-                              <div className="mb-2 flex items-center justify-end">
-                                <button
-                                  className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
-                                  onClick={() => void loadDesktopDirectories()}
-                                >
-                                  {tCommon('action.refresh', { ns: 'common', defaultValue: 'Refresh' })}
-                                </button>
-                              </div>
-
-                              <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto pr-1">
-                                {desktopDirectoriesLoading ? (
-                                  <span className="text-[11px] text-muted-foreground/60">
-                                    {tChat('input.loadingFolders', { defaultValue: 'Loading folders...' })}
-                                  </span>
-                                ) : desktopDirectories.length > 0 ? (
-                                  desktopDirectories.map((directory) => {
-                                    const selected = directory.path.toLowerCase() === normalizedWorkingFolder
-                                    return (
-                                      <button
-                                        key={directory.path}
-                                        className={cn(
-                                          'inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors',
-                                          selected
-                                            ? 'border-primary/60 bg-primary/10 text-primary'
-                                            : 'border-border/70 bg-muted/20 text-muted-foreground hover:text-foreground hover:bg-muted/50'
-                                        )}
-                                        onClick={() => handleSelectDesktopFolder(directory.path)}
-                                        title={directory.path}
-                                      >
-                                        <FolderOpen className="size-3 shrink-0" />
-                                        <span className="max-w-[260px] truncate">{directory.name}</span>
-                                      </button>
-                                    )
-                                  })
-                                ) : (
-                                  <span className="text-[11px] text-muted-foreground/60">
-                                    {tChat('input.noDesktopFolders', {
-                                      defaultValue: 'No folders found on Desktop'
+                      <div className="flex flex-1 overflow-hidden">
+                        {/* Center: Chat Area */}
+                        <div className="flex min-w-0 flex-1 flex-col bg-gradient-to-b from-background to-muted/20">
+                          {/* Mode selector toolbar */}
+                          <div className="flex shrink-0 items-center gap-2 px-3 py-2">
+                            {!leftSidebarOpen && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="size-7 shrink-0"
+                                    onClick={toggleLeftSidebar}
+                                  >
+                                    <PanelLeftOpen className="size-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  {t('layout.expandSidebar', { defaultValue: 'Expand sidebar' })}
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                            <div className="flex items-center gap-0.5 rounded-lg bg-background/95 backdrop-blur-sm p-0.5 shadow-md border border-border/50">
+                              {modes.map((m, i) => (
+                                <Tooltip key={m.value}>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant={mode === m.value ? 'secondary' : 'ghost'}
+                                      size="sm"
+                                      className={cn(
+                                        'h-6 gap-1.5 rounded-md px-2.5 text-xs font-medium transition-all duration-200',
+                                        mode === m.value
+                                          ? 'bg-background shadow-sm ring-1 ring-border/50'
+                                          : 'text-muted-foreground hover:text-foreground'
+                                      )}
+                                      onClick={() => setMode(m.value)}
+                                    >
+                                      {m.icon}
+                                      {tCommon(m.labelKey)}
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    {tCommon(m.labelKey)} (Ctrl+{i + 1})
+                                  </TooltipContent>
+                                </Tooltip>
+                              ))}
+                            </div>
+                            <div className="flex-1" />
+                            <div className="flex items-center gap-0.5 rounded-lg border bg-background/80 backdrop-blur-sm shadow-sm px-0.5 py-0.5">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    className="group/btn flex h-6 items-center gap-1 rounded-md px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200 disabled:opacity-50"
+                                    onClick={() => void handleExportImage()}
+                                    disabled={exporting || isStreaming}
+                                  >
+                                    {exporting ? (
+                                      <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                                    ) : (
+                                      <ImageDown className="size-3.5 shrink-0" />
+                                    )}
+                                    <span
+                                      className="max-w-0 overflow-hidden pl-0 text-[10px] opacity-0 whitespace-nowrap group-hover/btn:max-w-[140px] group-hover/btn:pl-1 group-hover/btn:opacity-100"
+                                      style={{
+                                        transition:
+                                          'max-width 220ms cubic-bezier(0.4, 0, 0.2, 1), opacity 160ms ease, padding 180ms ease'
+                                      }}
+                                    >
+                                      {exporting
+                                        ? t('layout.exporting', { defaultValue: 'Exporting...' })
+                                        : t('layout.exportImage', {
+                                            defaultValue: 'Copy as image'
+                                          })}
+                                    </span>
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  {t('layout.exportImage', { defaultValue: 'Copy as image' })}
+                                </TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    className="group/btn flex h-6 items-center gap-1 rounded-md px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200 disabled:opacity-50"
+                                    onClick={handleCopyAll}
+                                    disabled={isStreaming}
+                                  >
+                                    {copiedAll ? (
+                                      <Check className="size-3.5 shrink-0" />
+                                    ) : (
+                                      <ClipboardCopy className="size-3.5 shrink-0" />
+                                    )}
+                                    <span
+                                      className="max-w-0 overflow-hidden pl-0 text-[10px] opacity-0 whitespace-nowrap group-hover/btn:max-w-[140px] group-hover/btn:pl-1 group-hover/btn:opacity-100"
+                                      style={{
+                                        transition:
+                                          'max-width 220ms cubic-bezier(0.4, 0, 0.2, 1), opacity 160ms ease, padding 180ms ease'
+                                      }}
+                                    >
+                                      {copiedAll
+                                        ? t('layout.copied', { defaultValue: 'Copied' })
+                                        : t('layout.copyAll', {
+                                            defaultValue: 'Copy conversation'
+                                          })}
+                                    </span>
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  {t('layout.copyAll', { defaultValue: 'Copy conversation' })}
+                                </TooltipContent>
+                              </Tooltip>
+                            </div>
+                          </div>
+                          <MessageList
+                            onRetry={retryLastMessage}
+                            onEditUserMessage={editAndResend}
+                          />
+                          <InputArea
+                            onSend={sendMessage}
+                            onStop={stopStreaming}
+                            onSelectFolder={mode !== 'chat' ? handleOpenFolderDialog : undefined}
+                            workingFolder={activeWorkingFolder}
+                            hideWorkingFolderIndicator
+                            isStreaming={isStreaming}
+                          />
+                          {mode !== 'chat' && (
+                            <Dialog open={folderDialogOpen} onOpenChange={setFolderDialogOpen}>
+                              <DialogContent className="p-4 sm:max-w-2xl">
+                                <DialogHeader>
+                                  <DialogTitle className="text-sm">
+                                    {tChat('input.desktopFolders', {
+                                      defaultValue: 'Desktop folders'
                                     })}
-                                  </span>
-                                )}
+                                  </DialogTitle>
+                                </DialogHeader>
 
-                                <button
-                                  className="inline-flex items-center gap-1 rounded-md border border-dashed px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-                                  onClick={() => void handleSelectOtherFolder()}
-                                >
-                                  <FolderOpen className="size-3 shrink-0" />
-                                  {tChat('input.selectOtherFolder', {
-                                    defaultValue: 'Select other folder'
-                                  })}
-                                </button>
-                              </div>
+                                <div className="-mt-1 rounded-xl border bg-background/60 p-3">
+                                  <div className="mb-2 rounded-md border border-border/60 bg-muted/20 px-2 py-1.5">
+                                    <p className="text-[10px] text-muted-foreground/70">
+                                      {tChat('input.currentWorkingFolder', {
+                                        defaultValue: 'Current working folder'
+                                      })}
+                                    </p>
+                                    <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                                      <FolderOpen className="size-3 shrink-0" />
+                                      <span className="truncate">
+                                        {activeWorkingFolder ??
+                                          tChat('input.noWorkingFolderSelected', {
+                                            defaultValue: 'No folder selected'
+                                          })}
+                                      </span>
+                                    </div>
+                                  </div>
 
-                              {/* SSH Connections */}
-                              <div className="mt-3 border-t pt-3">
-                                <p className="mb-2 flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground/70">
-                                  <Monitor className="size-3" />
-                                  {tChat('input.sshConnections', { defaultValue: 'SSH Connections' })}
-                                </p>
-                                {sshConnections.length > 0 ? (
-                                  <div className="space-y-1.5">
-                                    {sshConnections.map((conn) => {
-                                      const isSelected = activeSessionView.activeSessionSshConnectionId === conn.id
-                                      const dirValue =
-                                        sshDirInputs[conn.id] ??
-                                        conn.defaultDirectory ??
-                                        DEFAULT_SSH_WORKDIR
-                                      const displayDir = dirValue.trim() || DEFAULT_SSH_WORKDIR
-                                      const isEditingDir = sshDirEditingId === conn.id
-                                      return (
-                                        <div
-                                          key={conn.id}
-                                          className={cn(
-                                            'flex items-center gap-2 rounded-md border px-2 py-1.5 transition-colors',
-                                            isSelected
-                                              ? 'border-primary/60 bg-primary/10'
-                                              : 'border-border/70 bg-muted/20 hover:bg-muted/50'
-                                          )}
-                                        >
-                                          <Server className="size-3 shrink-0 text-muted-foreground/60" />
-                                          <div className="flex-1 min-w-0">
-                                            <div className="text-[11px] font-medium truncate">{conn.name}</div>
-                                          <div className="text-[9px] text-muted-foreground/50 truncate">
-                                            {conn.username}@{conn.host}:{conn.port}
-                                          </div>
-                                        </div>
-                                        <div className="flex items-center gap-1.5">
+                                  <div className="mb-2 flex items-center justify-end">
+                                    <button
+                                      className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
+                                      onClick={() => void loadDesktopDirectories()}
+                                    >
+                                      {tCommon('action.refresh', {
+                                        ns: 'common',
+                                        defaultValue: 'Refresh'
+                                      })}
+                                    </button>
+                                  </div>
+
+                                  <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto pr-1">
+                                    {desktopDirectoriesLoading ? (
+                                      <span className="text-[11px] text-muted-foreground/60">
+                                        {tChat('input.loadingFolders', {
+                                          defaultValue: 'Loading folders...'
+                                        })}
+                                      </span>
+                                    ) : desktopDirectories.length > 0 ? (
+                                      desktopDirectories.map((directory) => {
+                                        const selected =
+                                          directory.path.toLowerCase() === normalizedWorkingFolder
+                                        return (
                                           <button
+                                            key={directory.path}
                                             className={cn(
-                                              'flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-all duration-200',
-                                              isEditingDir
-                                                ? 'max-w-0 opacity-0 -translate-x-1 pointer-events-none'
-                                                : 'max-w-[180px] bg-background/40 hover:bg-muted/40'
-                                            )}
-                                            onClick={() => setSshDirEditingId(conn.id)}
-                                            title={displayDir}
-                                          >
-                                            <FolderOpen className="size-3 shrink-0" />
-                                            <span className="truncate">{displayDir}</span>
-                                          </button>
-                                          <div
-                                            className={cn(
-                                              'overflow-hidden transition-all duration-200',
-                                              isEditingDir
-                                                ? 'max-w-[200px] opacity-100'
-                                                : 'max-w-0 opacity-0 pointer-events-none'
-                                            )}
-                                          >
-                                            <Input
-                                              value={dirValue}
-                                              onChange={(e) =>
-                                                setSshDirInputs((prev) => ({
-                                                  ...prev,
-                                                  [conn.id]: e.target.value,
-                                                }))
-                                              }
-                                              onKeyDown={(e) => {
-                                                if (e.key === 'Enter') handleSelectSshFolder(conn.id)
-                                                if (e.key === 'Escape') setSshDirEditingId(null)
-                                              }}
-                                              placeholder={tChat('input.sshDirectoryPlaceholder', {
-                                                defaultValue: '/home/user/project',
-                                              })}
-                                              className="h-6 w-40 text-[10px] bg-background/60"
-                                            />
-                                          </div>
-                                          <button
-                                            className={cn(
-                                              'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors',
-                                              isEditingDir
-                                                ? 'border-primary/50 text-primary'
-                                                : 'border-border/70 hover:text-foreground hover:bg-muted/50'
+                                              'inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors',
+                                              selected
+                                                ? 'border-primary/60 bg-primary/10 text-primary'
+                                                : 'border-border/70 bg-muted/20 text-muted-foreground hover:text-foreground hover:bg-muted/50'
                                             )}
                                             onClick={() =>
-                                              setSshDirEditingId(isEditingDir ? null : conn.id)
+                                              handleSelectDesktopFolder(directory.path)
                                             }
+                                            title={directory.path}
                                           >
-                                            <Pencil className="size-3" />
+                                            <FolderOpen className="size-3 shrink-0" />
+                                            <span className="max-w-[260px] truncate">
+                                              {directory.name}
+                                            </span>
                                           </button>
-                                          <button
-                                            className="shrink-0 rounded-md border px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10 transition-colors"
-                                            onClick={() => handleSelectSshFolder(conn.id)}
-                                          >
-                                            {tChat('input.sshSelect', { defaultValue: 'Select' })}
-                                          </button>
-                                        </div>
-                                      </div>
-                                    )
-                                  })}
+                                        )
+                                      })
+                                    ) : (
+                                      <span className="text-[11px] text-muted-foreground/60">
+                                        {tChat('input.noDesktopFolders', {
+                                          defaultValue: 'No folders found on Desktop'
+                                        })}
+                                      </span>
+                                    )}
+
+                                    <button
+                                      className="inline-flex items-center gap-1 rounded-md border border-dashed px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                                      onClick={() => void handleSelectOtherFolder()}
+                                    >
+                                      <FolderOpen className="size-3 shrink-0" />
+                                      {tChat('input.selectOtherFolder', {
+                                        defaultValue: 'Select other folder'
+                                      })}
+                                    </button>
                                   </div>
-                                ) : (
-                                  <span className="text-[11px] text-muted-foreground/60">
-                                    {tChat('input.noSshConnections', {
-                                      defaultValue: 'No SSH connections configured',
-                                    })}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </DialogContent>
-                        </Dialog>
-                      )}
-                    </div>
 
-                    {/* Preview Panel */}
-                    <AnimatePresence>
-                      {previewPanelOpen && (
-                        <PanelTransition
-                          side="right"
-                          disabled={isStreaming}
-                          className="h-full border-l border-border/50 shadow-sm z-10"
-                        >
-                          <PreviewPanel />
-                        </PanelTransition>
-                      )}
-                    </AnimatePresence>
+                                  {/* SSH Connections */}
+                                  <div className="mt-3 border-t pt-3">
+                                    <p className="mb-2 flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground/70">
+                                      <Monitor className="size-3" />
+                                      {tChat('input.sshConnections', {
+                                        defaultValue: 'SSH Connections'
+                                      })}
+                                    </p>
+                                    {sshConnections.length > 0 ? (
+                                      <div className="space-y-1.5">
+                                        {sshConnections.map((conn) => {
+                                          const isSelected =
+                                            activeSessionView.activeSessionSshConnectionId ===
+                                            conn.id
+                                          const dirValue =
+                                            sshDirInputs[conn.id] ??
+                                            conn.defaultDirectory ??
+                                            DEFAULT_SSH_WORKDIR
+                                          const displayDir = dirValue.trim() || DEFAULT_SSH_WORKDIR
+                                          const isEditingDir = sshDirEditingId === conn.id
+                                          return (
+                                            <div
+                                              key={conn.id}
+                                              className={cn(
+                                                'flex items-center gap-2 rounded-md border px-2 py-1.5 transition-colors',
+                                                isSelected
+                                                  ? 'border-primary/60 bg-primary/10'
+                                                  : 'border-border/70 bg-muted/20 hover:bg-muted/50'
+                                              )}
+                                            >
+                                              <Server className="size-3 shrink-0 text-muted-foreground/60" />
+                                              <div className="flex-1 min-w-0">
+                                                <div className="text-[11px] font-medium truncate">
+                                                  {conn.name}
+                                                </div>
+                                                <div className="text-[9px] text-muted-foreground/50 truncate">
+                                                  {conn.username}@{conn.host}:{conn.port}
+                                                </div>
+                                              </div>
+                                              <div className="flex items-center gap-1.5">
+                                                <button
+                                                  className={cn(
+                                                    'flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-all duration-200',
+                                                    isEditingDir
+                                                      ? 'max-w-0 opacity-0 -translate-x-1 pointer-events-none'
+                                                      : 'max-w-[180px] bg-background/40 hover:bg-muted/40'
+                                                  )}
+                                                  onClick={() => setSshDirEditingId(conn.id)}
+                                                  title={displayDir}
+                                                >
+                                                  <FolderOpen className="size-3 shrink-0" />
+                                                  <span className="truncate">{displayDir}</span>
+                                                </button>
+                                                <div
+                                                  className={cn(
+                                                    'overflow-hidden transition-all duration-200',
+                                                    isEditingDir
+                                                      ? 'max-w-[200px] opacity-100'
+                                                      : 'max-w-0 opacity-0 pointer-events-none'
+                                                  )}
+                                                >
+                                                  <Input
+                                                    value={dirValue}
+                                                    onChange={(e) =>
+                                                      setSshDirInputs((prev) => ({
+                                                        ...prev,
+                                                        [conn.id]: e.target.value
+                                                      }))
+                                                    }
+                                                    onKeyDown={(e) => {
+                                                      if (e.key === 'Enter')
+                                                        handleSelectSshFolder(conn.id)
+                                                      if (e.key === 'Escape')
+                                                        setSshDirEditingId(null)
+                                                    }}
+                                                    placeholder={tChat(
+                                                      'input.sshDirectoryPlaceholder',
+                                                      {
+                                                        defaultValue: '/home/user/project'
+                                                      }
+                                                    )}
+                                                    className="h-6 w-40 text-[10px] bg-background/60"
+                                                  />
+                                                </div>
+                                                <button
+                                                  className={cn(
+                                                    'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors',
+                                                    isEditingDir
+                                                      ? 'border-primary/50 text-primary'
+                                                      : 'border-border/70 hover:text-foreground hover:bg-muted/50'
+                                                  )}
+                                                  onClick={() =>
+                                                    setSshDirEditingId(
+                                                      isEditingDir ? null : conn.id
+                                                    )
+                                                  }
+                                                >
+                                                  <Pencil className="size-3" />
+                                                </button>
+                                                <button
+                                                  className="shrink-0 rounded-md border px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10 transition-colors"
+                                                  onClick={() => handleSelectSshFolder(conn.id)}
+                                                >
+                                                  {tChat('input.sshSelect', {
+                                                    defaultValue: 'Select'
+                                                  })}
+                                                </button>
+                                              </div>
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    ) : (
+                                      <span className="text-[11px] text-muted-foreground/60">
+                                        {tChat('input.noSshConnections', {
+                                          defaultValue: 'No SSH connections configured'
+                                        })}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </DialogContent>
+                            </Dialog>
+                          )}
+                        </div>
 
-                    {/* Middle: Detail Panel */}
-                    <AnimatePresence>
-                      {detailPanelOpen && (
-                        <PanelTransition
-                          side="right"
-                          disabled={isStreaming}
-                          className="h-full border-l border-border/50 shadow-sm z-10"
-                        >
-                          <DetailPanel />
-                        </PanelTransition>
-                      )}
-                    </AnimatePresence>
+                        {/* Preview Panel */}
+                        <AnimatePresence>
+                          {previewPanelOpen && (
+                            <PanelTransition
+                              side="right"
+                              disabled={isStreaming}
+                              className="h-full border-l border-border/50 shadow-sm z-10"
+                            >
+                              <PreviewPanel />
+                            </PanelTransition>
+                          )}
+                        </AnimatePresence>
 
-                    {/* Right: Cowork/Code Panel */}
-                    {mode !== 'chat' && (
-                      <RightPanel compact={previewPanelOpen} />
-                    )}
-                  </div>
-                  </ErrorBoundary>
-                </PageTransition>
-              )}
-            </AnimatePresence>
+                        {/* Middle: Detail Panel */}
+                        <AnimatePresence>
+                          {detailPanelOpen && (
+                            <PanelTransition
+                              side="right"
+                              disabled={isStreaming}
+                              className="h-full border-l border-border/50 shadow-sm z-10"
+                            >
+                              <DetailPanel />
+                            </PanelTransition>
+                          )}
+                        </AnimatePresence>
+
+                        {/* Right: Cowork/Code Panel */}
+                        {mode !== 'chat' && <RightPanel compact={previewPanelOpen} />}
+                      </div>
+                    </ErrorBoundary>
+                  </PageTransition>
+                )}
+              </AnimatePresence>
             )}
           </div>
         </div>

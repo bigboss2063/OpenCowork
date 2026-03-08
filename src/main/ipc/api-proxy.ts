@@ -158,7 +158,7 @@ function requestViaSystemProxy(args: {
   method: string
   headers: Record<string, string>
   body?: string
-}): Promise<{ statusCode?: number; error?: string; body?: string }> {
+}): Promise<{ statusCode?: number; error?: string; body?: string; headers?: Record<string, string | string[] | undefined> }> {
   const { url, method, headers, body } = args
   const requestUrl = url.trim()
   const bodyBuffer = body ? Buffer.from(body, 'utf-8') : null
@@ -167,7 +167,7 @@ function requestViaSystemProxy(args: {
   return new Promise((resolve) => {
     let done = false
     let timeout: ReturnType<typeof setTimeout> | null = null
-    const finish = (payload: { statusCode?: number; error?: string; body?: string }): void => {
+    const finish = (payload: { statusCode?: number; error?: string; body?: string; headers?: Record<string, string | string[] | undefined> }): void => {
       if (done) return
       done = true
       if (timeout) {
@@ -186,7 +186,7 @@ function requestViaSystemProxy(args: {
       let responseBody = ''
       res.on('data', (chunk: Buffer) => { responseBody += chunk.toString() })
       res.on('end', () => {
-        finish({ statusCode: res.statusCode, body: responseBody })
+        finish({ statusCode: res.statusCode, body: responseBody, headers: res.headers as Record<string, string | string[] | undefined> })
       })
     })
 
@@ -206,12 +206,24 @@ function requestViaSystemProxy(args: {
 
 export function registerApiProxyHandlers(): void {
   // Handle non-streaming API requests (e.g., test connection)
-  ipcMain.handle('api:request', async (_event, req: Omit<APIStreamRequest, 'requestId'>) => {
-    const { url, method, headers, body, useSystemProxy } = req
+  ipcMain.handle('api:request', async (event, req: Omit<APIStreamRequest, 'requestId'>) => {
+    const { url, method, headers, body, useSystemProxy, providerId, providerBuiltinId } = req
     try {
       console.log(`[API Proxy] request ${method} ${url}`)
       if (useSystemProxy) {
-        return await requestViaSystemProxy({ url, method, headers, body })
+        const result = await requestViaSystemProxy({ url, method, headers, body })
+        if ((providerId || providerBuiltinId) && result.headers) {
+          const quota = extractCodexQuota(result.headers)
+          if (quota && event.sender) {
+            event.sender.send('api:quota-update', {
+              url,
+              providerId,
+              providerBuiltinId,
+              quota,
+            })
+          }
+        }
+        return { statusCode: result.statusCode, body: result.body, error: result.error }
       }
       const parsedUrl = new URL(url)
       const isHttps = parsedUrl.protocol === 'https:'
@@ -236,6 +248,17 @@ export function registerApiProxyHandlers(): void {
           let responseBody = ''
           res.on('data', (chunk: Buffer) => { responseBody += chunk.toString() })
           res.on('end', () => {
+            if (providerId || providerBuiltinId) {
+              const quota = extractCodexQuota(res.headers as Record<string, string | string[] | undefined>)
+              if (quota && event.sender) {
+                event.sender.send('api:quota-update', {
+                  url,
+                  providerId,
+                  providerBuiltinId,
+                  quota,
+                })
+              }
+            }
             resolve({ statusCode: res.statusCode, body: responseBody })
           })
         })

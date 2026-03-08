@@ -32,6 +32,7 @@ import { nanoid } from 'nanoid'
 import type { TeamMember, TeamTask, TeamMessage } from '@renderer/lib/agent/teams/types'
 import { useTranslation } from 'react-i18next'
 import * as React from 'react'
+import { useShallow } from 'zustand/react/shallow'
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -111,7 +112,11 @@ function MessageInput({ targetName }: { targetName: string }): React.JSX.Element
             send()
           }
         }}
-        placeholder={isBroadcast ? t('team.broadcastPlaceholder') : t('team.messagePlaceholder', { name: targetName })}
+        placeholder={
+          isBroadcast
+            ? t('team.broadcastPlaceholder')
+            : t('team.messagePlaceholder', { name: targetName })
+        }
         className="flex-1 min-w-0 rounded-md border bg-background px-2 py-1 text-[11px] placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-cyan-500/30"
       />
       <button
@@ -144,12 +149,12 @@ const MemberDetailRow = React.memo(function MemberDetailRow({
   const [toolsOpen, setToolsOpen] = React.useState(false)
   const isWorking = member.status === 'working'
 
-  const [now, setNow] = React.useState(Date.now())
+  const [now, setNow] = React.useState(member.startedAt)
   React.useEffect(() => {
     if (!isWorking) return
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
-  }, [isWorking])
+  }, [isWorking, member.startedAt])
   const elapsed = (member.completedAt ?? now) - member.startedAt
 
   const lastTool =
@@ -204,7 +209,7 @@ const MemberDetailRow = React.memo(function MemberDetailRow({
             {member.iteration > 0 && <span>Iter {member.iteration}</span>}
             <span>{member.toolCalls.length} tool calls</span>
             <span>{formatElapsed(elapsed)}</span>
-            {member.usage && (member.usage.inputTokens + member.usage.outputTokens) > 0 && (
+            {member.usage && member.usage.inputTokens + member.usage.outputTokens > 0 && (
               <span className="flex items-center gap-0.5">
                 <Zap className="size-2.5" />
                 {formatTokenCount(member.usage.inputTokens + member.usage.outputTokens)} tokens
@@ -273,7 +278,9 @@ const MemberDetailRow = React.memo(function MemberDetailRow({
               <CollapsibleTrigger asChild>
                 <button className="flex w-full items-center gap-1.5 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors py-0.5">
                   <Wrench className="size-2.5" />
-                  <span className="font-medium uppercase tracking-wider">{t('team.toolCalls')}</span>
+                  <span className="font-medium uppercase tracking-wider">
+                    {t('team.toolCalls')}
+                  </span>
                   <Badge variant="secondary" className="text-[8px] h-3.5 px-1 ml-0.5">
                     {member.toolCalls.length}
                   </Badge>
@@ -447,7 +454,19 @@ function SectionHeader({
 
 export function TeamPanel(): React.JSX.Element {
   const { t } = useTranslation('cowork')
-  const activeTeam = useTeamStore((s) => s.activeTeam)
+  const activeTeam = useTeamStore(
+    useShallow((s) => {
+      const team = s.activeTeam
+      if (!team) return null
+      return {
+        name: team.name,
+        description: team.description,
+        members: team.members,
+        tasks: team.tasks,
+        messages: team.messages
+      }
+    })
+  )
 
   const handleStopMember = React.useCallback((memberId: string): void => {
     abortTeammate(memberId)
@@ -470,9 +489,7 @@ export function TeamPanel(): React.JSX.Element {
       <div className="flex flex-col items-center justify-center py-12 text-center">
         <Users className="mb-3 size-8 text-muted-foreground/40" />
         <p className="text-sm text-muted-foreground">{t('team.noTeam')}</p>
-        <p className="mt-1 text-xs text-muted-foreground/60">
-          {t('team.noTeamDesc')}
-        </p>
+        <p className="mt-1 text-xs text-muted-foreground/60">{t('team.noTeamDesc')}</p>
       </div>
     )
   }
@@ -497,7 +514,9 @@ export function TeamPanel(): React.JSX.Element {
                 {members.length}
               </Badge>
               {workingMembers.length > 0 && (
-                <span className="text-[9px] text-cyan-500">{t('team.workingCount', { count: workingMembers.length })}</span>
+                <span className="text-[9px] text-cyan-500">
+                  {t('team.workingCount', { count: workingMembers.length })}
+                </span>
               )}
             </div>
             <p className="text-[10px] text-muted-foreground/60 truncate">
@@ -553,9 +572,7 @@ export function TeamPanel(): React.JSX.Element {
               label={t('team.messages')}
               count={messages.length || undefined}
             />
-            {messages.length > 0 && (
-              <MessagesTimeline messages={messages} />
-            )}
+            {messages.length > 0 && <MessagesTimeline messages={messages} />}
             {/* Broadcast to all teammates */}
             {workingMembers.length > 0 && <MessageInput targetName="all" />}
           </div>

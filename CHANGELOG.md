@@ -3,6 +3,8 @@
 All notable changes to **OpenCowork** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com).
 
+## [0.4.6] - 2026-03-09
+
 ## [0.4.5] - 2026-03-07
 
 ### Added

@@ -64,6 +64,8 @@ function CopyOutputBtn({ text }: { text: string }): React.JSX.Element {
   )
 }
 
+export const SubAgentCard = React.memo(SubAgentCardInner)
+
 interface SubAgentCardProps {
   /** The tool name ("Task" for unified tool, or legacy SubAgent names) */
   name: string
@@ -77,7 +79,7 @@ interface SubAgentCardProps {
   isLive?: boolean
 }
 
-export function SubAgentCard({
+function SubAgentCardInner({
   name,
   toolUseId,
   input,
@@ -91,10 +93,10 @@ export function SubAgentCard({
   // Resolve display name: for unified Task tool, use input.subagent_type; otherwise legacy name
   const displayName = String(input.subagent_type ?? name)
 
-  // Live state from agent store — match by toolUseId for precise identification
-  const activeSubAgents = useAgentStore((s) => s.activeSubAgents)
-  const completedSubAgents = useAgentStore((s) => s.completedSubAgents)
-  const live = isLive ? (activeSubAgents[toolUseId] ?? completedSubAgents[toolUseId] ?? null) : null
+  // Live state from agent store — subscribe only to this card's toolUseId
+  const live = useAgentStore((s) =>
+    isLive ? (s.activeSubAgents[toolUseId] ?? s.completedSubAgents[toolUseId] ?? null) : null
+  )
 
   // Extract string from ToolResultContent for backward-compat
   const outputStr = typeof output === 'string' ? output : undefined
@@ -115,12 +117,13 @@ export function SubAgentCard({
     : false
 
   // Live elapsed time counter (auto-updates every second while running)
-  const [now, setNow] = React.useState(Date.now())
+  const [now, setNow] = React.useState(live?.startedAt ?? 0)
   React.useEffect(() => {
     if (!live?.isRunning) return
+    setNow(Date.now())
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
-  }, [live?.isRunning])
+  }, [live?.isRunning, live?.startedAt])
 
   const elapsed = live ? (live.completedAt ?? now) - live.startedAt : (histMeta?.elapsed ?? null)
 
@@ -193,7 +196,11 @@ export function SubAgentCard({
                 variant={isRunning ? 'default' : isError ? 'destructive' : 'secondary'}
                 className={cn('text-[9px] px-1.5 h-4', isRunning && 'bg-violet-500 animate-pulse')}
               >
-                {isRunning ? t('subAgent.working') : isError ? t('subAgent.failed') : t('subAgent.done')}
+                {isRunning
+                  ? t('subAgent.working')
+                  : isError
+                    ? t('subAgent.failed')
+                    : t('subAgent.done')}
               </Badge>
             </div>
             {queryText && (
@@ -208,7 +215,9 @@ export function SubAgentCard({
                 </span>
                 <span>·</span>
                 <span className="tabular-nums">
-                  {t('subAgent.calls', { count: live?.toolCalls.length ?? histMeta?.toolCalls.length ?? 0 })}
+                  {t('subAgent.calls', {
+                    count: live?.toolCalls.length ?? histMeta?.toolCalls.length ?? 0
+                  })}
                 </span>
               </>
             )}
@@ -251,7 +260,9 @@ export function SubAgentCard({
                 <CollapsibleTrigger asChild>
                   <button className="flex w-full items-center gap-1.5 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors">
                     <Wrench className="size-2.5" />
-                    <span className="font-medium uppercase tracking-wider">{t('subAgent.toolCalls', { ns: 'chat' })}</span>
+                    <span className="font-medium uppercase tracking-wider">
+                      {t('subAgent.toolCalls', { ns: 'chat' })}
+                    </span>
                     <Badge variant="secondary" className="text-[9px] h-3.5 px-1 ml-0.5">
                       {live.toolCalls.length}
                     </Badge>
@@ -291,7 +302,9 @@ export function SubAgentCard({
                 <CollapsibleTrigger asChild>
                   <button className="flex w-full items-center gap-1.5 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors">
                     <Wrench className="size-2.5" />
-                    <span className="font-medium uppercase tracking-wider">{t('subAgent.toolCalls', { ns: 'chat' })}</span>
+                    <span className="font-medium uppercase tracking-wider">
+                      {t('subAgent.toolCalls', { ns: 'chat' })}
+                    </span>
                     <Badge variant="secondary" className="text-[9px] h-3.5 px-1 ml-0.5">
                       {histMeta.toolCalls.length}
                     </Badge>
