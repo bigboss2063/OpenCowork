@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next'
 import { Check, CheckCircle2, ChevronRight, ChevronLeft, MessageSquare } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { Button } from '@renderer/components/ui/button'
+import { useChatStore } from '@renderer/stores/chat-store'
+import { useSettingsStore } from '@renderer/stores/settings-store'
 import { resolveAskUserAnswers } from '@renderer/lib/tools/ask-user-tool'
 import type { AskUserQuestionItem, AskUserAnswers } from '@renderer/lib/tools/ask-user-tool'
 import type { ToolCallStatus } from '@renderer/lib/agent/types'
@@ -20,6 +22,36 @@ interface AskUserQuestionCardProps {
 interface AnsweredPair {
   question: string
   answer: string
+}
+
+const RECOMMENDED_OPTION_RE = /(?:\(|（)\s*(recommended|推荐)\s*(?:\)|）)/i
+
+function isRecommendedOptionLabel(label: string): boolean {
+  return RECOMMENDED_OPTION_RE.test(label)
+}
+
+function buildRecommendedAnswers(
+  questions: AskUserQuestionItem[]
+): { answers: AskUserAnswers; selections: Map<number, Set<string>> } | null {
+  const answers: AskUserAnswers = {}
+  const selections = new Map<number, Set<string>>()
+
+  for (let index = 0; index < questions.length; index += 1) {
+    const item = questions[index]
+    const recommended = (item.options ?? [])
+      .map((opt) => opt.label)
+      .filter((label) => isRecommendedOptionLabel(label))
+
+    if (recommended.length === 0) {
+      return null
+    }
+
+    const chosen = item.multiSelect ? recommended : [recommended[0]]
+    selections.set(index, new Set(chosen))
+    answers[String(index)] = item.multiSelect ? chosen : chosen[0]
+  }
+
+  return { answers, selections }
 }
 
 function QuestionBlock({
@@ -227,6 +259,12 @@ export function AskUserQuestionCard({
     () => (input.questions as AskUserQuestionItem[]) ?? [],
     [input.questions]
   )
+  const activeSessionMode = useChatStore(
+    (s) => s.sessions.find((session) => session.id === s.activeSessionId)?.mode
+  )
+  const clarifyAutoAcceptRecommended = useSettingsStore(
+    (s) => s.clarifyAutoAcceptRecommended
+  )
   const isAnswered = status === 'completed' && !!output
   const isPending = !isAnswered && (status === 'running' || isLive)
   const answeredPairs = React.useMemo(() => parseAnsweredPairs(output), [output])
@@ -235,6 +273,34 @@ export function AskUserQuestionCard({
   const [selections, setSelections] = useState<Map<number, Set<string>>>(() => new Map())
   const [customTexts, setCustomTexts] = useState<Map<number, string>>(() => new Map())
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
+  const autoSubmittedRef = React.useRef(false)
+
+  const recommendedAnswers = React.useMemo(() => buildRecommendedAnswers(questions), [questions])
+
+  React.useEffect(() => {
+    autoSubmittedRef.current = false
+  }, [toolUseId])
+
+  React.useEffect(() => {
+    if (autoSubmittedRef.current) return
+    if (!isPending || isAnswered) return
+    if (activeSessionMode !== 'clarify') return
+    if (!clarifyAutoAcceptRecommended) return
+    if (!recommendedAnswers) return
+
+    autoSubmittedRef.current = true
+    setSelections(recommendedAnswers.selections)
+    setCurrentQuestionIndex(Math.max(questions.length - 1, 0))
+    resolveAskUserAnswers(toolUseId, recommendedAnswers.answers)
+  }, [
+    activeSessionMode,
+    clarifyAutoAcceptRecommended,
+    isAnswered,
+    isPending,
+    questions.length,
+    recommendedAnswers,
+    toolUseId
+  ])
 
   const handleToggle = useCallback(
     (qIdx: number, value: string) => {

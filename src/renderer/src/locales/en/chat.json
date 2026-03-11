@@ -59,7 +59,11 @@
     "queueCleared": "Queued messages cleared",
     "queueClearConfirmTitle": "Clear queued messages?",
     "queueClearConfirmDesc": "This will remove {{count}} queued messages in the current session.",
-    "clearConfirmDescWithQueue": "This will remove all messages in this conversation and clear {{count}} queued messages in the current session. This action cannot be undone."
+    "clearConfirmDescWithQueue": "This will remove all messages in this conversation and clear {{count}} queued messages in the current session. This action cannot be undone.",
+    "recommendationDefaultChat": "Help me turn the current context into a clearer question I can directly ask next.",
+    "recommendationDefaultClarify": "Keep questioning me until the goal, constraints, boundaries, and acceptance criteria are clear.",
+    "recommendationDefaultCowork": "Based on the current context, suggest the next collaborative task worth executing.",
+    "recommendationDefaultCode": "Based on the current context, suggest the next code change goal and implementation requirements."
   },
   "askUser": {
     "title": "Your input is needed",

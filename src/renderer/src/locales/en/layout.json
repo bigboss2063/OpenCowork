@@ -51,6 +51,9 @@
   },
   "topbar": {
     "togglePanel": "Toggle Panel",
+    "clarifyAutoAcceptShort": "Auto Q",
+    "clarifyAutoAcceptOn": "Clarify auto-accept is enabled — AskUserQuestion recommended answers are selected and submitted automatically",
+    "clarifyAutoAcceptOff": "Clarify auto-accept is disabled",
     "autoApproveOn": "Auto-approve is ON — all tools run without confirmation",
     "pendingCount": "{{count}} pending",
     "toolCallAwaiting": "Tool call awaiting approval — press Y to allow, N to deny",

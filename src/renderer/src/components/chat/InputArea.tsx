@@ -28,6 +28,7 @@ import { updateWebSearchToolRegistration } from '@renderer/lib/tools'
 import { useUIStore, type AppMode } from '@renderer/stores/ui-store'
 import { formatTokens } from '@renderer/lib/format-tokens'
 import { useDebouncedTokens } from '@renderer/hooks/use-estimated-tokens'
+import { usePromptRecommendation } from '@renderer/hooks/use-prompt-recommendation'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from 'react-i18next'
@@ -188,6 +189,13 @@ const placeholderKeys: Record<AppMode, string> = {
   code: 'input.placeholderCode'
 }
 
+const defaultRecommendationKeys: Record<AppMode, string> = {
+  chat: 'input.recommendationDefaultChat',
+  clarify: 'input.recommendationDefaultClarify',
+  cowork: 'input.recommendationDefaultCowork',
+  code: 'input.recommendationDefaultCode'
+}
+
 interface InputHistoryEntry {
   text: string
   images: ImageAttachment[]
@@ -200,6 +208,7 @@ interface InputHistoryDraft {
 }
 
 const EMPTY_QUEUED_MESSAGES: PendingSessionMessageItem[] = []
+const EMPTY_SESSION_MESSAGES = [] as const
 const INPUT_HISTORY_LIMIT = 30
 const PENDING_HISTORY_KEY = '__pending_session__'
 const MIN_INPUT_HEIGHT = 120
@@ -267,6 +276,7 @@ export function InputArea({
   const currentLanguage = useSettingsStore((state) => state.language)
   const contentScrollRef = React.useRef<HTMLDivElement>(null)
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
+  const suggestionMeasureRef = React.useRef<HTMLDivElement>(null)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const queueFileInputRef = React.useRef<HTMLInputElement>(null)
   const rootRef = React.useRef<HTMLDivElement>(null)
@@ -376,13 +386,14 @@ export function InputArea({
   }, [])
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen)
   const mode = useUIStore((s) => s.mode)
-  const { activeSessionId, hasMessages, clearSessionMessages } = useChatStore(
+  const { activeSessionId, hasMessages, clearSessionMessages, sessionMessages } = useChatStore(
     useShallow((s) => {
       const activeSession = s.sessions.find((sess) => sess.id === s.activeSessionId)
       return {
         activeSessionId: s.activeSessionId,
         hasMessages: (activeSession?.messageCount ?? 0) > 0,
-        clearSessionMessages: s.clearSessionMessages
+        clearSessionMessages: s.clearSessionMessages,
+        sessionMessages: activeSession?.messages ?? EMPTY_SESSION_MESSAGES
       }
     })
   )
@@ -531,18 +542,44 @@ export function InputArea({
       historyDraftRef.current = null
     }
   }, [historyCursor])
+  const recommendationFallback = t(defaultRecommendationKeys[mode])
+  const {
+    suggestionText,
+    measureText,
+    effectivePlaceholder,
+    acceptSuggestion,
+    handleFocus: handleRecommendationFocus,
+    handleBlur: handleRecommendationBlur,
+    handleSelectionChange: handleRecommendationSelectionChange,
+    handleCompositionStart: handleRecommendationCompositionStart,
+    handleCompositionEnd: handleRecommendationCompositionEnd
+  } = usePromptRecommendation({
+    mode,
+    sessionId: activeSessionId,
+    text,
+    recentMessages: sessionMessages,
+    selectedSkill,
+    images: attachedImages,
+    disabled: disabled || isOptimizing,
+    isStreaming,
+    fallbackSuggestion: recommendationFallback,
+    textareaRef
+  })
   const resizeTextarea = React.useCallback(() => {
     const el = textareaRef.current
     if (!el) return
-    // Ensure we disable field-sizing: content to control height manually
     el.style.setProperty('field-sizing', 'fixed')
     if (inputHeight) {
       el.style.height = '100%'
       return
     }
+
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
-  }, [inputHeight])
+    const suggestionHeight = suggestionMeasureRef.current?.scrollHeight ?? 0
+    const autoMaxHeight = measureText ? getMaxInputHeight() : 200
+    const nextHeight = Math.min(Math.max(el.scrollHeight, suggestionHeight, 60), autoMaxHeight)
+    el.style.height = `${nextHeight}px`
+  }, [getMaxInputHeight, inputHeight, measureText])
 
   React.useEffect(() => {
     resizeTextarea()
@@ -799,6 +836,20 @@ export function InputArea({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.nativeEvent.isComposing) return
     if (isOptimizing) return // Disable input during optimization
+    if (!e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === 'Tab') {
+      const acceptedSuggestion = acceptSuggestion()
+      if (acceptedSuggestion) {
+        e.preventDefault()
+        clearHistoryNavigation()
+        setText(acceptedSuggestion)
+        requestAnimationFrame(() => {
+          resizeTextarea()
+          focusInputAtEnd()
+          handleRecommendationSelectionChange()
+        })
+        return
+      }
+    }
     if (
       !e.altKey &&
       !e.ctrlKey &&
@@ -1453,17 +1504,42 @@ export function InputArea({
                 </span>
               </div>
             )}
-            <Textarea
-              ref={textareaRef}
-              value={text}
-              onChange={handleInput}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={t(placeholderKeys[mode] ?? 'input.placeholder')}
-              className="min-h-[60px] w-full resize-none border-0 bg-background dark:bg-background p-1 shadow-none focus-visible:ring-0 text-base md:text-sm flex-1"
-              rows={1}
-              disabled={disabled || isOptimizing}
-            />
+            <div className="relative flex-1 min-h-[60px]">
+              <div
+                ref={suggestionMeasureRef}
+                aria-hidden="true"
+                className="pointer-events-none invisible absolute inset-0 whitespace-pre-wrap break-words p-1 text-base md:text-sm"
+              >
+                {measureText || text || ' '}
+              </div>
+              {suggestionText && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words p-1 text-base md:text-sm text-muted-foreground/45"
+                >
+                  <span className="invisible">{text}</span>
+                  <span>{suggestionText}</span>
+                </div>
+              )}
+              <Textarea
+                ref={textareaRef}
+                value={text}
+                onChange={handleInput}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onFocus={handleRecommendationFocus}
+                onBlur={handleRecommendationBlur}
+                onClick={handleRecommendationSelectionChange}
+                onKeyUp={handleRecommendationSelectionChange}
+                onSelect={handleRecommendationSelectionChange}
+                onCompositionStart={handleRecommendationCompositionStart}
+                onCompositionEnd={handleRecommendationCompositionEnd}
+                placeholder={effectivePlaceholder ?? t(placeholderKeys[mode] ?? 'input.placeholder')}
+                className="relative z-10 min-h-[60px] w-full resize-none border-0 bg-transparent dark:bg-transparent p-1 shadow-none focus-visible:ring-0 text-base md:text-sm flex-1"
+                rows={1}
+                disabled={disabled || isOptimizing}
+              />
+            </div>
           </div>
 
           {/* Hidden file input for queue image upload */}

@@ -86,7 +86,9 @@ Your job:
 
 Get granular. Get uncomfortable. If my answers raise new questions, pull on that thread.
 
-Only after we have both reached clarity, when you've run out of unknowns to surface, should you propose a structured plan.
+You may gather background context with read-only inspection, relevant Skills, WebSearch, and non-mutating Bash commands when that helps you ask better questions.
+
+Only after we have both reached clarity, when you've run out of unknowns to surface, should you stop questioning. At that point, explicitly state that the next step is to use Plan Mode. If the user wants to continue, recommend EnterPlanMode instead of silently ending or drifting into implementation. Do not write a long implementation plan inline unless the user explicitly asks for it.
 
 Start by asking me what I want to build.`
 
@@ -190,8 +192,10 @@ export function buildSystemPrompt(options: {
     parts.push(
       `\n## Mode: Clarify`,
       `This is a read-only mode focused on discovery and requirement clarification before planning or implementation.`,
-      `Do not use mutating tools such as Edit, Write, Bash, or any other tool that changes files, runs commands, schedules jobs, or performs side effects.`,
-      `Use AskUserQuestion aggressively to keep probing until ambiguity is exhausted. If repository context is useful, limit yourself to read-only inspection tools.`,
+      `Do not use mutating tools such as Edit, Write, or any other tool that changes files, schedules jobs, starts long-running processes, installs packages, or performs side effects.`,
+      `Use AskUserQuestion aggressively to keep probing until ambiguity is exhausted. You may gather background context with read-only inspection tools, the Skill tool, WebSearch, and Bash for non-mutating information-gathering commands.`,
+      `In Clarify mode, Bash is for safe reconnaissance only: inspect files, environment, dependencies, git history, or other context. Do not use Bash to edit files, run builds, start servers, or make persistent changes.`,
+      `When ambiguity is exhausted, explicitly hand off to Plan Mode as the recommended next step. If the user is ready, prefer calling EnterPlanMode over writing the full plan inline.`,
       CLARIFY_CORE_PROMPT
     )
   } else if (mode === 'cowork') {

@@ -59,7 +59,11 @@
     "queueCleared": "已清空排队消息",
     "queueClearConfirmTitle": "清空排队消息？",
     "queueClearConfirmDesc": "这将删除当前会话中 {{count}} 条待发送消息。",
-    "clearConfirmDescWithQueue": "这将删除此对话中的所有消息，并清空当前会话的 {{count}} 条待发送消息。此操作不可撤销。"
+    "clearConfirmDescWithQueue": "这将删除此对话中的所有消息，并清空当前会话的 {{count}} 条待发送消息。此操作不可撤销。",
+    "recommendationDefaultChat": "帮我基于当前上下文整理一个更清晰、可直接执行的问题。",
+    "recommendationDefaultClarify": "请继续追问我，直到把目标、约束、边界和验收标准问清楚。",
+    "recommendationDefaultCowork": "基于当前上下文，帮我拆出下一步最值得执行的协作任务。",
+    "recommendationDefaultCode": "基于当前上下文，帮我给出下一步最合适的代码修改目标和实现要求。"
   },
   "askUser": {
     "title": "需要你的回答",

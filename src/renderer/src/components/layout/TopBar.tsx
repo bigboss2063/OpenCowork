@@ -44,8 +44,14 @@ export function TopBar(): React.JSX.Element {
   const { theme, setTheme } = useTheme()
 
   const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const activeSessionMode = useChatStore(
+    (s) => s.sessions.find((session) => session.id === s.activeSessionId)?.mode
+  )
   const updateSessionMode = useChatStore((s) => s.updateSessionMode)
   const autoApprove = useSettingsStore((s) => s.autoApprove)
+  const clarifyAutoAcceptRecommended = useSettingsStore(
+    (s) => s.clarifyAutoAcceptRecommended
+  )
   const pendingApprovals = useAgentStore((s) => s.pendingToolCalls.length)
   const errorCount = useAgentStore((s) =>
     s.executedToolCalls.reduce(
@@ -136,6 +142,35 @@ export function TopBar(): React.JSX.Element {
 
       {/* Right-side controls — must not shrink */}
       <div className="flex shrink-0 items-center gap-1">
+        {/* Clarify auto-accept recommended */}
+        {(activeSessionMode === 'clarify' || mode === 'clarify') && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  'titlebar-no-drag rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors',
+                  clarifyAutoAcceptRecommended
+                    ? 'bg-emerald-500/12 text-emerald-500 hover:bg-emerald-500/20'
+                    : 'bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground'
+                )}
+                onClick={() =>
+                  useSettingsStore.getState().updateSettings({
+                    clarifyAutoAcceptRecommended: !clarifyAutoAcceptRecommended
+                  })
+                }
+              >
+                {t('topbar.clarifyAutoAcceptShort')}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {clarifyAutoAcceptRecommended
+                ? t('topbar.clarifyAutoAcceptOn')
+                : t('topbar.clarifyAutoAcceptOff')}
+            </TooltipContent>
+          </Tooltip>
+        )}
+
         {/* Auto-approve warning */}
         {autoApprove && (
           <Tooltip>
@@ -211,18 +246,20 @@ export function TopBar(): React.JSX.Element {
           <Popover>
             <Tooltip>
               <TooltipTrigger asChild>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="titlebar-no-drag h-7 gap-1.5 px-2 text-[10px]"
-                  >
-                    <Terminal className="size-3.5" />
-                    {t('topbar.backgroundCommandsCount', {
-                      count: runningBackgroundCommands.length
-                    })}
-                  </Button>
-                </PopoverTrigger>
+                <span className="inline-flex">
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="titlebar-no-drag h-7 gap-1.5 px-2 text-[10px]"
+                    >
+                      <Terminal className="size-3.5" />
+                      {t('topbar.backgroundCommandsCount', {
+                        count: runningBackgroundCommands.length
+                      })}
+                    </Button>
+                  </PopoverTrigger>
+                </span>
               </TooltipTrigger>
               <TooltipContent>{t('topbar.backgroundCommandsTooltip')}</TooltipContent>
             </Tooltip>

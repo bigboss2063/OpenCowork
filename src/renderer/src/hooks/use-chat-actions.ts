@@ -78,6 +78,7 @@ const CLARIFY_ALLOWED_TOOLS = new Set([
   'Glob',
   'Grep',
   'Skill',
+  'Bash',
   'WebSearch',
   'OpenPreview',
   'EnterPlanMode',

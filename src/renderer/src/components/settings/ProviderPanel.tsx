@@ -834,6 +834,10 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
     updateProvider(provider.id, { channel: { ...current, channelType: value } })
   }
 
+  const enabledModelCount = provider.models.filter((model) => model.enabled).length
+  const hasEnabledModels = enabledModelCount > 0
+  const hasDisabledModels = enabledModelCount < provider.models.length
+
   const filteredModels = useMemo(() => {
     if (!modelSearch) return provider.models
     const q = modelSearch.toLowerCase()
@@ -841,6 +845,15 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
       (m) => m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
     )
   }, [provider.models, modelSearch])
+
+  const handleSetAllModelsEnabled = (enabled: boolean): void => {
+    setProviderModels(
+      provider.id,
+      provider.models.map((model) =>
+        model.enabled === enabled ? model : { ...model, enabled }
+      )
+    )
+  }
 
   const getLatestProvider = (): AIProvider =>
     useProviderStore.getState().providers.find((p) => p.id === provider.id) ?? provider
@@ -1866,21 +1879,41 @@ function ProviderConfigPanel({ provider }: { provider: AIProvider }): React.JSX.
               <p className="text-[11px] text-muted-foreground">
                 {t('provider.modelCount', {
                   total: provider.models.length,
-                  enabled: provider.models.filter((m) => m.enabled).length
+                  enabled: enabledModelCount
                 })}
               </p>
             </div>
             <div className="flex items-center gap-1.5">
               {provider.models.length > 0 && (
-                <div className="relative">
-                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-muted-foreground" />
-                  <Input
-                    placeholder={t('provider.searchModels')}
-                    value={modelSearch}
-                    onChange={(e) => setModelSearch(e.target.value)}
-                    className="h-7 w-32 pl-7 text-[11px]"
-                  />
-                </div>
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    disabled={!hasDisabledModels}
+                    onClick={() => handleSetAllModelsEnabled(true)}
+                  >
+                    {t('provider.enableAllModels')}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    disabled={!hasEnabledModels}
+                    onClick={() => handleSetAllModelsEnabled(false)}
+                  >
+                    {t('provider.disableAllModels')}
+                  </Button>
+                  <div className="relative">
+                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-muted-foreground" />
+                    <Input
+                      placeholder={t('provider.searchModels')}
+                      value={modelSearch}
+                      onChange={(e) => setModelSearch(e.target.value)}
+                      className="h-7 w-32 pl-7 text-[11px]"
+                    />
+                  </div>
+                </>
               )}
               <Button
                 variant="outline"

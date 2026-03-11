@@ -785,6 +785,28 @@ function GeneralPanel(): React.JSX.Element {
 
       <Separator />
 
+      {/* Clarify Auto Accept Recommended */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between max-w-lg">
+          <div>
+            <label className="text-sm font-medium">
+              {t('general.clarifyAutoAcceptRecommended')}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t('general.clarifyAutoAcceptRecommendedDesc')}
+            </p>
+          </div>
+          <Switch
+            checked={settings.clarifyAutoAcceptRecommended}
+            onCheckedChange={(checked) =>
+              settings.updateSettings({ clarifyAutoAcceptRecommended: checked })
+            }
+          />
+        </div>
+      </section>
+
+      <Separator />
+
       {/* Auto Approve */}
       <section className="space-y-3">
         <div className="flex items-center justify-between max-w-lg">
@@ -1141,6 +1163,43 @@ function ModelPanel(): React.JSX.Element {
     if (!providerId || !modelId) return null
     return { providerId, modelId }
   }
+  const recommendationModeDefs: Array<{
+    mode: keyof typeof settings.promptRecommendationModels
+    labelKey: string
+    descKey: string
+  }> = [
+    {
+      mode: 'chat',
+      labelKey: 'model.promptRecommendationModes.chat',
+      descKey: 'model.promptRecommendationModesDesc.chat'
+    },
+    {
+      mode: 'clarify',
+      labelKey: 'model.promptRecommendationModes.clarify',
+      descKey: 'model.promptRecommendationModesDesc.clarify'
+    },
+    {
+      mode: 'cowork',
+      labelKey: 'model.promptRecommendationModes.cowork',
+      descKey: 'model.promptRecommendationModesDesc.cowork'
+    },
+    {
+      mode: 'code',
+      labelKey: 'model.promptRecommendationModes.code',
+      descKey: 'model.promptRecommendationModesDesc.code'
+    }
+  ]
+  const updatePromptRecommendationModel = (
+    mode: keyof typeof settings.promptRecommendationModels,
+    value: string
+  ): void => {
+    settings.updateSettings({
+      promptRecommendationModels: {
+        ...settings.promptRecommendationModels,
+        [mode]: value === '__none__' ? null : parseModelValue(value)
+      }
+    })
+  }
 
   const activeModelValue =
     activeProvider && activeModelId ? buildModelValue(activeProvider.id, activeModelId) : ''
@@ -1303,6 +1362,75 @@ function ModelPanel(): React.JSX.Element {
                 ) : (
                   <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
                 )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>
+            )}
+          </section>
+
+          <section className="space-y-3">
+            <div>
+              <label className="text-sm font-medium">{t('model.promptRecommendationTitle')}</label>
+              <p className="text-xs text-muted-foreground">
+                {t('model.promptRecommendationDesc')}
+              </p>
+            </div>
+            {chatProviderGroups.length > 0 ? (
+              <div className="grid gap-3 md:grid-cols-2">
+                {recommendationModeDefs.map(({ mode, labelKey, descKey }) => {
+                  const binding = settings.promptRecommendationModels[mode]
+                  const value = binding
+                    ? buildModelValue(binding.providerId, binding.modelId)
+                    : '__none__'
+                  return (
+                    <div key={mode} className="rounded-lg border p-3 space-y-2">
+                      <div>
+                        <p className="text-sm font-medium">{t(labelKey)}</p>
+                        <p className="text-xs text-muted-foreground">{t(descKey)}</p>
+                      </div>
+                      <Select value={value} onValueChange={(nextValue) => updatePromptRecommendationModel(mode, nextValue)}>
+                        <SelectTrigger className="w-full text-xs">
+                          <SelectValue placeholder={t('model.selectRecommendationModel')} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__none__" className="text-xs">
+                            {t('model.disableRecommendation')}
+                          </SelectItem>
+                          {chatProviderGroups.map(({ provider, models }) => (
+                            <SelectGroup key={`${provider.id}-recommendation-${mode}`}>
+                              <SelectLabel className="text-[10px] uppercase tracking-wide">
+                                {provider.name}
+                              </SelectLabel>
+                              {models.map((m) => (
+                                <SelectItem
+                                  key={`${provider.id}-${mode}-${m.id}`}
+                                  value={buildModelValue(provider.id, m.id)}
+                                  className="text-xs"
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <ModelIcon
+                                      icon={m.icon}
+                                      modelId={m.id}
+                                      providerBuiltinId={provider.builtinId}
+                                      size={16}
+                                      className="text-muted-foreground/70"
+                                    />
+                                    <div className="flex flex-col text-left">
+                                      <span>{m.name}</span>
+                                      <span className="text-[10px] text-muted-foreground/60">
+                                        {m.id}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )
+                })}
               </div>
             ) : (
               <p className="text-xs text-muted-foreground/60">{t('model.noModelsHint')}</p>

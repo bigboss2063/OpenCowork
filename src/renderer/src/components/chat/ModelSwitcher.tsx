@@ -131,11 +131,13 @@ function ModelSettingsPopover({
     <Popover>
       <Tooltip>
         <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <button className="inline-flex items-center justify-center h-8 w-7 rounded-r-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border/30">
-              <Settings2 className="size-3" />
-            </button>
-          </PopoverTrigger>
+          <span className="inline-flex">
+            <PopoverTrigger asChild>
+              <button className="inline-flex items-center justify-center h-8 w-7 rounded-r-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border/30">
+                <Settings2 className="size-3" />
+              </button>
+            </PopoverTrigger>
+          </span>
         </TooltipTrigger>
         <TooltipContent>{t('topbar.modelSettings')}</TooltipContent>
       </Tooltip>
@@ -300,20 +302,22 @@ export function ModelSwitcher(): React.JSX.Element {
       <Popover open={open} onOpenChange={setOpen}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <PopoverTrigger asChild>
-              <button className="inline-flex items-center gap-1 h-8 rounded-l-lg px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors">
-                <ModelIcon
-                  icon={activeModel?.icon}
-                  modelId={activeModelId}
-                  providerBuiltinId={activeProvider?.builtinId}
-                  size={20}
-                />
-                {hasCustomPrompt && (
-                  <span className="size-1.5 rounded-full bg-violet-400 shrink-0" />
-                )}
-                <ChevronDown className="size-2.5 opacity-40" />
-              </button>
-            </PopoverTrigger>
+            <span className="inline-flex">
+              <PopoverTrigger asChild>
+                <button className="inline-flex items-center gap-1 h-8 rounded-l-lg px-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors">
+                  <ModelIcon
+                    icon={activeModel?.icon}
+                    modelId={activeModelId}
+                    providerBuiltinId={activeProvider?.builtinId}
+                    size={20}
+                  />
+                  {hasCustomPrompt && (
+                    <span className="size-1.5 rounded-full bg-violet-400 shrink-0" />
+                  )}
+                  <ChevronDown className="size-2.5 opacity-40" />
+                </button>
+              </PopoverTrigger>
+            </span>
           </TooltipTrigger>
           <TooltipContent side="top">
             {activeModel?.name || activeModelId || t('topbar.noModel')}

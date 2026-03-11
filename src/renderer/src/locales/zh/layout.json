@@ -51,6 +51,9 @@
   },
   "topbar": {
     "togglePanel": "切换面板",
+    "clarifyAutoAcceptShort": "推荐答",
+    "clarifyAutoAcceptOn": "澄清模式已开启自动接受推荐项 — 遇到 AskUserQuestion 会自动选择并提交推荐答案",
+    "clarifyAutoAcceptOff": "澄清模式自动接受推荐项已关闭",
     "autoApproveOn": "自动批准已开启 — 所有工具调用无需确认",
     "pendingCount": "{{count}} 个待处理",
     "toolCallAwaiting": "工具调用等待审批 — 按 Y 允许，按 N 拒绝",

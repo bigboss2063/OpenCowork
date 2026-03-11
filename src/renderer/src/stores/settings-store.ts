@@ -3,6 +3,16 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 import type { ProviderType, ReasoningEffortLevel } from '../lib/api/types'
 import { ipcStorage } from '../lib/ipc/ipc-storage'
 
+export interface ModelBinding {
+  providerId: string
+  modelId: string
+}
+
+export type PromptRecommendationModelBindings = Record<
+  'chat' | 'clarify' | 'cowork' | 'code',
+  ModelBinding | null
+>
+
 function getSystemLanguage(): 'en' | 'zh' {
   const lang = navigator.language || navigator.languages?.[0] || 'en'
   return lang.startsWith('zh') ? 'zh' : 'en'
@@ -20,6 +30,7 @@ interface SettingsStore {
   theme: 'light' | 'dark' | 'system'
   language: 'en' | 'zh'
   autoApprove: boolean
+  clarifyAutoAcceptRecommended: boolean
   devMode: boolean
   thinkingEnabled: boolean
   fastModeEnabled: boolean
@@ -59,6 +70,9 @@ interface SettingsStore {
   skillsMarketProvider: 'skillsmp'
   skillsMarketApiKey: string
 
+  // Prompt Recommendation Settings
+  promptRecommendationModels: PromptRecommendationModelBindings
+
   updateSettings: (patch: Partial<Omit<SettingsStore, 'updateSettings'>>) => void
 }
 
@@ -76,6 +90,7 @@ export const useSettingsStore = create<SettingsStore>()(
       theme: 'system',
       language: getSystemLanguage(),
       autoApprove: false,
+      clarifyAutoAcceptRecommended: false,
       devMode: false,
       thinkingEnabled: false,
       fastModeEnabled: false,
@@ -106,11 +121,19 @@ export const useSettingsStore = create<SettingsStore>()(
       skillsMarketProvider: 'skillsmp',
       skillsMarketApiKey: '',
 
+      // Prompt Recommendation Settings
+      promptRecommendationModels: {
+        chat: null,
+        clarify: null,
+        cowork: null,
+        code: null
+      },
+
       updateSettings: (patch) => set(patch)
     }),
     {
       name: 'opencowork-settings',
-      version: 3,
+      version: 4,
       storage: createJSONStorage(() => ipcStorage),
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
@@ -131,6 +154,14 @@ export const useSettingsStore = create<SettingsStore>()(
           state.skillsMarketProvider = 'skillsmp'
           state.skillsMarketApiKey = state.skillsMarketApiKey ?? ''
         }
+        if (state.promptRecommendationModels === undefined) {
+          state.promptRecommendationModels = {
+            chat: null,
+            clarify: null,
+            cowork: null,
+            code: null
+          }
+        }
         // Add appearance settings if missing
         if (state.backgroundColor === undefined) {
           state.backgroundColor = ''
@@ -146,6 +177,9 @@ export const useSettingsStore = create<SettingsStore>()(
         }
         if (state.toolbarCollapsedByDefault === undefined) {
           state.toolbarCollapsedByDefault = false
+        }
+        if (state.clarifyAutoAcceptRecommended === undefined) {
+          state.clarifyAutoAcceptRecommended = false
         }
         if (state.editorWorkspaceEnabled === undefined) {
           state.editorWorkspaceEnabled = false
@@ -166,6 +200,7 @@ export const useSettingsStore = create<SettingsStore>()(
         theme: state.theme,
         language: state.language,
         autoApprove: state.autoApprove,
+        clarifyAutoAcceptRecommended: state.clarifyAutoAcceptRecommended,
         devMode: state.devMode,
         thinkingEnabled: state.thinkingEnabled,
         fastModeEnabled: state.fastModeEnabled,
@@ -191,7 +226,9 @@ export const useSettingsStore = create<SettingsStore>()(
         webSearchTimeout: state.webSearchTimeout,
         // Skills Market Settings
         skillsMarketProvider: state.skillsMarketProvider,
-        skillsMarketApiKey: state.skillsMarketApiKey
+        skillsMarketApiKey: state.skillsMarketApiKey,
+        // Prompt Recommendation Settings
+        promptRecommendationModels: state.promptRecommendationModels
         // NOTE: apiKey is intentionally excluded from localStorage persistence.
         // In production, it should be stored securely in the main process.
       })
