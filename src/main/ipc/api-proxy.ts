@@ -15,6 +15,7 @@ interface APIStreamRequest {
   providerId?: string
   providerBuiltinId?: string
   transport?: 'http' | 'websocket'
+  transportSessionKey?: string
 }
 
 function readTimeoutFromEnv(name: string, fallbackMs: number): number {
@@ -233,9 +234,7 @@ function encodeSseEvent(eventType: string, payload: unknown): string {
   return `event: ${eventType}\ndata: ${JSON.stringify(payload)}\n\n`
 }
 
-function parseProxyResult(
-  result: string
-): string | null {
+function parseProxyResult(result: string): string | null {
   const s = result.trim().toUpperCase()
   if (!s || s === 'DIRECT') return null
   const m = s.match(/^(?:PROXY|HTTPS)\s+([^\s]+)$/i)
@@ -243,6 +242,435 @@ function parseProxyResult(
   const hostPort = m[1].trim()
   if (!hostPort) return null
   return hostPort.startsWith('http') ? hostPort : `http://${hostPort}`
+}
+
+interface ResponsesWebSocketRun {
+  requestId: string
+  sender: Electron.WebContents
+  body: Record<string, unknown>
+  aborted: boolean
+  cleanupAbortListener?: () => void
+}
+
+interface ResponsesWebSocketConnection {
+  key: string
+  wsUrl: string
+  headers: Record<string, string>
+  useSystemProxy?: boolean
+  socket: WebSocket | null
+  state: 'connecting' | 'open' | 'closed'
+  connectedAt: number
+  lastUsedAt: number
+  openPromise: Promise<WebSocket> | null
+  queue: ResponsesWebSocketRun[]
+  current: ResponsesWebSocketRun | null
+  pumping: boolean
+  idleCloseTimer: ReturnType<typeof setTimeout> | null
+  requestIdleTimer: ReturnType<typeof setTimeout> | null
+}
+
+const RESPONSES_WEBSOCKET_CONNECTIONS = new Map<string, ResponsesWebSocketConnection>()
+const RESPONSES_WEBSOCKET_MAX_AGE_MS = 55 * 60 * 1000
+const RESPONSES_WEBSOCKET_IDLE_CLOSE_MS = 5 * 60 * 1000
+const RESPONSES_WEBSOCKET_TERMINAL_EVENTS = new Set([
+  'response.completed',
+  'response.failed',
+  'response.incomplete',
+  'response.cancelled',
+  'error'
+])
+
+function buildResponsesWebSocketConnectionKey(
+  req: APIStreamRequest,
+  wsUrl: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>
+): string {
+  const model = typeof body.model === 'string' ? body.model : ''
+  return [
+    req.transportSessionKey ?? '',
+    wsUrl,
+    model,
+    headers.Authorization ?? headers.authorization ?? '',
+    headers['OpenAI-Organization'] ?? headers['openai-organization'] ?? '',
+    headers['OpenAI-Project'] ?? headers['openai-project'] ?? '',
+    req.useSystemProxy ? 'proxy' : 'direct'
+  ].join('\u0001')
+}
+
+function describeResponsesWebSocketConnection(
+  connection: Pick<ResponsesWebSocketConnection, 'key' | 'wsUrl' | 'state' | 'queue' | 'current'>
+): string {
+  const key = connection.key.slice(0, 12)
+  return `key=${key} state=${connection.state} queue=${connection.queue.length} active=${connection.current ? 'yes' : 'no'} url=${connection.wsUrl}`
+}
+
+function isSenderAlive(sender: Electron.WebContents): boolean {
+  return !sender.isDestroyed()
+}
+
+function sendResponsesWebSocketEnd(run: ResponsesWebSocketRun): void {
+  run.cleanupAbortListener?.()
+  run.cleanupAbortListener = undefined
+  if (!isSenderAlive(run.sender)) return
+  run.sender.send('api:stream-end', { requestId: run.requestId })
+}
+
+function sendResponsesWebSocketError(run: ResponsesWebSocketRun, message: string): void {
+  run.cleanupAbortListener?.()
+  run.cleanupAbortListener = undefined
+  if (!isSenderAlive(run.sender)) return
+  run.sender.send('api:stream-error', {
+    requestId: run.requestId,
+    error: message
+  })
+}
+
+function sendResponsesWebSocketChunk(
+  run: ResponsesWebSocketRun,
+  eventType: string,
+  payload: unknown
+): void {
+  if (!isSenderAlive(run.sender)) return
+  run.sender.send('api:stream-chunk', {
+    requestId: run.requestId,
+    data: encodeSseEvent(eventType, payload)
+  })
+}
+
+function clearResponsesWebSocketRequestIdle(connection: ResponsesWebSocketConnection): void {
+  if (connection.requestIdleTimer) {
+    clearTimeout(connection.requestIdleTimer)
+    connection.requestIdleTimer = null
+  }
+}
+
+function closeResponsesWebSocketSocket(
+  connection: ResponsesWebSocketConnection,
+  code = 1000,
+  reason = 'normal closure'
+): void {
+  console.log(
+    `[Responses WS] Close socket ${describeResponsesWebSocketConnection(connection)} code=${code} reason=${reason}`
+  )
+  const socket = connection.socket
+  connection.socket = null
+  connection.state = 'closed'
+  connection.openPromise = null
+  clearResponsesWebSocketRequestIdle(connection)
+  if (!socket) return
+  if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+    socket.close(code, reason)
+  }
+}
+
+function clearResponsesWebSocketIdleClose(connection: ResponsesWebSocketConnection): void {
+  if (connection.idleCloseTimer) {
+    clearTimeout(connection.idleCloseTimer)
+    connection.idleCloseTimer = null
+  }
+}
+
+function scheduleResponsesWebSocketIdleClose(connection: ResponsesWebSocketConnection): void {
+  clearResponsesWebSocketIdleClose(connection)
+  if (connection.current || connection.queue.length > 0) return
+  console.log(
+    `[Responses WS] Schedule idle close ${describeResponsesWebSocketConnection(connection)} timeoutMs=${RESPONSES_WEBSOCKET_IDLE_CLOSE_MS}`
+  )
+  connection.idleCloseTimer = setTimeout(() => {
+    closeResponsesWebSocketSocket(connection, 1000, 'idle close')
+    RESPONSES_WEBSOCKET_CONNECTIONS.delete(connection.key)
+  }, RESPONSES_WEBSOCKET_IDLE_CLOSE_MS)
+}
+
+function resetResponsesWebSocketRequestIdle(connection: ResponsesWebSocketConnection): void {
+  clearResponsesWebSocketRequestIdle(connection)
+  const idleTimeout = readTimeoutFromEnv('OPENCOWORK_API_IDLE_TIMEOUT_MS', 300_000)
+  if (idleTimeout <= 0 || !connection.current) return
+  connection.requestIdleTimer = setTimeout(() => {
+    closeResponsesWebSocketSocket(connection, 4000, 'request idle timeout')
+  }, idleTimeout)
+}
+
+async function createResponsesWebSocketAgent(
+  wsUrl: string,
+  useSystemProxy?: boolean
+): Promise<InstanceType<typeof HttpsProxyAgent> | undefined> {
+  if (!useSystemProxy) return undefined
+  try {
+    const result = await session.defaultSession.resolveProxy(wsUrl)
+    const proxyUrl = parseProxyResult(result)
+    return proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined
+  } catch (err) {
+    console.warn('[API Proxy] WebSocket resolveProxy failed, connecting direct:', err)
+    return undefined
+  }
+}
+
+function failResponsesWebSocketRun(
+  connection: ResponsesWebSocketConnection,
+  message: string
+): void {
+  const run = connection.current
+  if (!run) return
+  connection.current = null
+  clearResponsesWebSocketRequestIdle(connection)
+  connection.lastUsedAt = Date.now()
+  sendResponsesWebSocketError(run, message)
+  scheduleResponsesWebSocketIdleClose(connection)
+  void pumpResponsesWebSocketConnection(connection)
+}
+
+function handleResponsesWebSocketMessage(
+  connection: ResponsesWebSocketConnection,
+  raw: WebSocket.RawData
+): void {
+  const run = connection.current
+  if (!run || run.aborted) return
+
+  connection.lastUsedAt = Date.now()
+  resetResponsesWebSocketRequestIdle(connection)
+
+  let payload: unknown
+  try {
+    payload = JSON.parse(raw.toString())
+  } catch {
+    return
+  }
+
+  const eventType =
+    typeof payload === 'object' &&
+    payload !== null &&
+    'type' in payload &&
+    typeof (payload as { type?: unknown }).type === 'string'
+      ? (payload as { type: string }).type
+      : 'message'
+
+  sendResponsesWebSocketChunk(run, eventType, payload)
+
+  if (!RESPONSES_WEBSOCKET_TERMINAL_EVENTS.has(eventType)) return
+
+  const errorCode =
+    eventType === 'error' &&
+    typeof payload === 'object' &&
+    payload !== null &&
+    typeof (payload as { error?: { code?: unknown } }).error?.code === 'string'
+      ? (payload as { error: { code: string } }).error.code
+      : null
+
+  console.log(
+    `[Responses WS] Terminal event requestId=${run.requestId} event=${eventType}${errorCode ? ` code=${errorCode}` : ''} ${describeResponsesWebSocketConnection(connection)}`
+  )
+
+  connection.current = null
+  clearResponsesWebSocketRequestIdle(connection)
+  connection.lastUsedAt = Date.now()
+  sendResponsesWebSocketEnd(run)
+
+  if (errorCode === 'websocket_connection_limit_reached') {
+    closeResponsesWebSocketSocket(connection, 4001, 'connection limit reached')
+  }
+
+  scheduleResponsesWebSocketIdleClose(connection)
+  void pumpResponsesWebSocketConnection(connection)
+}
+
+function handleResponsesWebSocketClose(
+  connection: ResponsesWebSocketConnection,
+  code: number,
+  reason: Buffer
+): void {
+  const reasonText = reason.toString().trim()
+  const currentRun = connection.current
+  const wasAborted = currentRun?.aborted === true
+  connection.socket = null
+  connection.state = 'closed'
+  connection.openPromise = null
+  clearResponsesWebSocketRequestIdle(connection)
+
+  if (currentRun) {
+    if (wasAborted) {
+      currentRun.cleanupAbortListener?.()
+      currentRun.cleanupAbortListener = undefined
+      connection.current = null
+    } else {
+      failResponsesWebSocketRun(
+        connection,
+        `WebSocket closed (${code})${reasonText ? `: ${reasonText}` : ''}`
+      )
+    }
+    return
+  }
+
+  scheduleResponsesWebSocketIdleClose(connection)
+  void pumpResponsesWebSocketConnection(connection)
+}
+
+async function ensureResponsesWebSocketOpen(
+  connection: ResponsesWebSocketConnection
+): Promise<WebSocket> {
+  clearResponsesWebSocketIdleClose(connection)
+
+  if (
+    connection.socket &&
+    connection.state === 'open' &&
+    connection.socket.readyState === WebSocket.OPEN &&
+    Date.now() - connection.connectedAt < RESPONSES_WEBSOCKET_MAX_AGE_MS
+  ) {
+    console.log(
+      `[Responses WS] Reuse open socket ${describeResponsesWebSocketConnection(connection)}`
+    )
+    return connection.socket
+  }
+
+  if (connection.socket && Date.now() - connection.connectedAt >= RESPONSES_WEBSOCKET_MAX_AGE_MS) {
+    closeResponsesWebSocketSocket(connection, 4002, 'connection refresh')
+  }
+
+  if (connection.openPromise) return connection.openPromise
+
+  connection.openPromise = (async () => {
+    console.log(
+      `[Responses WS] Open new socket ${describeResponsesWebSocketConnection(connection)}`
+    )
+    const agent = await createResponsesWebSocketAgent(connection.wsUrl, connection.useSystemProxy)
+    const handshakeTimeout = readTimeoutFromEnv('OPENCOWORK_API_CONNECTION_TIMEOUT_MS', 30_000)
+
+    return await new Promise<WebSocket>((resolve, reject) => {
+      let settled = false
+      const socket = new WebSocket(connection.wsUrl, {
+        headers: connection.headers,
+        handshakeTimeout,
+        perMessageDeflate: false,
+        ...(agent ? { agent } : {})
+      })
+
+      connection.socket = socket
+      connection.state = 'connecting'
+
+      const rejectOnce = (message: string): void => {
+        if (settled) return
+        settled = true
+        connection.socket = null
+        connection.state = 'closed'
+        connection.openPromise = null
+        reject(new Error(message))
+      }
+
+      socket.on('open', () => {
+        if (settled) return
+        settled = true
+        connection.state = 'open'
+        connection.connectedAt = Date.now()
+        connection.lastUsedAt = connection.connectedAt
+        connection.openPromise = null
+        console.log(
+          `[Responses WS] Socket opened ${describeResponsesWebSocketConnection(connection)}`
+        )
+        resolve(socket)
+      })
+
+      socket.on('message', (raw) => {
+        handleResponsesWebSocketMessage(connection, raw)
+      })
+
+      socket.on('unexpected-response', (_request, response) => {
+        rejectOnce(`WebSocket handshake failed: HTTP ${response.statusCode ?? 0}`)
+      })
+
+      socket.on('error', (err) => {
+        if (!settled) {
+          rejectOnce(err.message)
+          return
+        }
+        console.error('[API Proxy] Responses WebSocket error:', err)
+      })
+
+      socket.on('close', (code, reason) => {
+        console.log(
+          `[Responses WS] Socket closed ${describeResponsesWebSocketConnection(connection)} code=${code} reason=${reason.toString().trim()}`
+        )
+        if (!settled) {
+          rejectOnce(`WebSocket closed (${code})${reason.toString().trim()}`)
+          return
+        }
+        handleResponsesWebSocketClose(connection, code, reason)
+      })
+    })
+  })()
+
+  return connection.openPromise
+}
+
+async function pumpResponsesWebSocketConnection(
+  connection: ResponsesWebSocketConnection
+): Promise<void> {
+  if (connection.pumping) return
+  connection.pumping = true
+
+  try {
+    while (!connection.current) {
+      const run = connection.queue.shift()
+      if (!run) {
+        scheduleResponsesWebSocketIdleClose(connection)
+        return
+      }
+      if (run.aborted || !isSenderAlive(run.sender)) {
+        run.cleanupAbortListener?.()
+        run.cleanupAbortListener = undefined
+        continue
+      }
+
+      connection.current = run
+      resetResponsesWebSocketRequestIdle(connection)
+
+      let socket: WebSocket
+      try {
+        socket = await ensureResponsesWebSocketOpen(connection)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        failResponsesWebSocketRun(connection, message)
+        continue
+      }
+
+      if (run.aborted || connection.current !== run) {
+        if (connection.current === run) {
+          connection.current = null
+          run.cleanupAbortListener?.()
+          run.cleanupAbortListener = undefined
+        }
+        continue
+      }
+
+      try {
+        console.log(
+          `[Responses WS] Send response.create requestId=${run.requestId} previous_response_id=${typeof run.body.previous_response_id === 'string' ? run.body.previous_response_id : 'none'} ${describeResponsesWebSocketConnection(connection)}`
+        )
+        socket.send(
+          JSON.stringify({
+            type: 'response.create',
+            ...run.body
+          }),
+          (err) => {
+            if (err && connection.current === run) {
+              failResponsesWebSocketRun(connection, err.message)
+              closeResponsesWebSocketSocket(connection, 1011, 'send failed')
+            }
+          }
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        failResponsesWebSocketRun(connection, message)
+        closeResponsesWebSocketSocket(connection, 1011, 'send failed')
+        continue
+      }
+
+      connection.lastUsedAt = Date.now()
+      return
+    }
+  } finally {
+    connection.pumping = false
+  }
 }
 
 async function streamViaResponsesWebSocket(
@@ -272,159 +700,66 @@ async function streamViaResponsesWebSocket(
   delete wsHeaders['Content-Type']
   delete wsHeaders['content-type']
 
-  let agent: InstanceType<typeof HttpsProxyAgent> | undefined
-  if (useSystemProxy) {
-    try {
-      const result = await session.defaultSession.resolveProxy(wsUrl)
-      const proxyUrl = parseProxyResult(result)
-      if (proxyUrl) {
-        agent = new HttpsProxyAgent(proxyUrl)
-      }
-    } catch (err) {
-      console.warn('[API Proxy] WebSocket resolveProxy failed, connecting direct:', err)
-    }
-  }
-
-  const CONNECTION_TIMEOUT = readTimeoutFromEnv('OPENCOWORK_API_CONNECTION_TIMEOUT_MS', 30_000)
-  const IDLE_TIMEOUT = readTimeoutFromEnv('OPENCOWORK_API_IDLE_TIMEOUT_MS', 300_000)
-
-  let settled = false
-  let finished = false
-  let aborted = false
-  let connectionTimer: ReturnType<typeof setTimeout> | null = null
-  let idleTimer: ReturnType<typeof setTimeout> | null = null
-
-  const clearTimers = (): void => {
-    if (connectionTimer) {
-      clearTimeout(connectionTimer)
-      connectionTimer = null
-    }
-    if (idleTimer) {
-      clearTimeout(idleTimer)
-      idleTimer = null
-    }
-  }
-
-  let socket: WebSocket
-  const resetIdleTimer = (): void => {
-    if (IDLE_TIMEOUT <= 0 || settled) return
-    if (idleTimer) clearTimeout(idleTimer)
-    idleTimer = setTimeout(() => {
-      socket.close(4000, 'idle timeout')
-    }, IDLE_TIMEOUT)
-  }
-
-  const complete = (): void => {
-    if (settled) return
-    settled = true
-    clearTimers()
-    sender.send('api:stream-end', { requestId })
-  }
-
-  const fail = (message: string): void => {
-    if (settled) return
-    settled = true
-    clearTimers()
-    sender.send('api:stream-error', {
-      requestId,
-      error: message
-    })
-  }
-
-  socket = new WebSocket(wsUrl, {
-    headers: wsHeaders,
-    handshakeTimeout: CONNECTION_TIMEOUT,
-    perMessageDeflate: false,
-    ...(agent ? { agent } : {})
-  })
-
-  if (CONNECTION_TIMEOUT > 0) {
-    connectionTimer = setTimeout(() => {
-      socket.close(4000, 'connection timeout')
-    }, CONNECTION_TIMEOUT)
-  }
-
-  socket.on('open', () => {
-    if (connectionTimer) {
-      clearTimeout(connectionTimer)
-      connectionTimer = null
-    }
-    resetIdleTimer()
-    socket.send(
-      JSON.stringify({
-        type: 'response.create',
-        ...requestBody
-      }),
-      (err) => {
-        if (err) {
-          fail(err.message)
-        }
-      }
+  const connectionKey = buildResponsesWebSocketConnectionKey(req, wsUrl, wsHeaders, requestBody)
+  let connection = RESPONSES_WEBSOCKET_CONNECTIONS.get(connectionKey)
+  if (!connection) {
+    console.log(
+      `[Responses WS] Create connection bucket key=${connectionKey.slice(0, 12)} url=${wsUrl}`
     )
-  })
-
-  socket.on('message', (raw) => {
-    resetIdleTimer()
-    let payload: unknown
-    try {
-      payload = JSON.parse(raw.toString())
-    } catch {
-      return
+    connection = {
+      key: connectionKey,
+      wsUrl,
+      headers: wsHeaders,
+      useSystemProxy,
+      socket: null,
+      state: 'closed',
+      connectedAt: 0,
+      lastUsedAt: Date.now(),
+      openPromise: null,
+      queue: [],
+      current: null,
+      pumping: false,
+      idleCloseTimer: null,
+      requestIdleTimer: null
     }
+    RESPONSES_WEBSOCKET_CONNECTIONS.set(connectionKey, connection)
+  }
 
-    const eventType =
-      typeof payload === 'object' &&
-      payload !== null &&
-      'type' in payload &&
-      typeof (payload as { type?: unknown }).type === 'string'
-        ? (payload as { type: string }).type
-        : 'message'
+  const run: ResponsesWebSocketRun = {
+    requestId,
+    sender,
+    body: requestBody,
+    aborted: false
+  }
 
-    sender.send('api:stream-chunk', {
-      requestId,
-      data: encodeSseEvent(eventType, payload)
-    })
-
-    if (
-      eventType === 'response.completed' ||
-      eventType === 'response.failed' ||
-      eventType === 'response.incomplete' ||
-      eventType === 'response.cancelled' ||
-      eventType === 'error'
-    ) {
-      finished = true
-      socket.close()
-    }
-  })
-
-  socket.on('unexpected-response', (_request, response) => {
-    fail(`WebSocket handshake failed: HTTP ${response.statusCode ?? 0}`)
-  })
-
-  socket.on('error', (err) => {
-    if (aborted) return
-    fail(err.message)
-  })
-
-  socket.on('close', (code, reason) => {
-    clearTimers()
-    ipcMain.removeListener('api:abort', abortHandler)
-    if (settled) return
-    if (aborted || finished) {
-      complete()
-      return
-    }
-    const reasonText = reason.toString().trim()
-    fail(`WebSocket closed (${code})${reasonText ? `: ${reasonText}` : ''}`)
-  })
+  console.log(
+    `[Responses WS] Queue request requestId=${requestId} key=${connectionKey.slice(0, 12)} previous_response_id=${typeof requestBody.previous_response_id === 'string' ? requestBody.previous_response_id : 'none'} model=${typeof requestBody.model === 'string' ? requestBody.model : ''}`
+  )
 
   const abortHandler = (_event: Electron.IpcMainEvent, data: { requestId: string }): void => {
     if (data.requestId !== requestId) return
-    aborted = true
-    socket.close()
+    run.aborted = true
+
+    if (connection.current === run) {
+      closeResponsesWebSocketSocket(connection, 4000, 'aborted')
+      return
+    }
+
+    const index = connection.queue.indexOf(run)
+    if (index >= 0) {
+      connection.queue.splice(index, 1)
+    }
+    run.cleanupAbortListener?.()
+    run.cleanupAbortListener = undefined
   }
 
+  run.cleanupAbortListener = () => {
+    ipcMain.removeListener('api:abort', abortHandler)
+  }
   ipcMain.on('api:abort', abortHandler)
+
+  connection.queue.push(run)
+  void pumpResponsesWebSocketConnection(connection)
 }
 
 export function registerApiProxyHandlers(): void {
@@ -526,7 +861,7 @@ export function registerApiProxyHandlers(): void {
 
     try {
       console.log(
-        `[API Proxy] stream-request[${requestId}] ${method} ${url} transport=${String(transport)}`
+        `[API Proxy] stream-request[${requestId}] ${method} ${url} transport=${String(transport ?? 'http')}`
       )
       if (transport === 'websocket') {
         void streamViaResponsesWebSocket(event, req).catch((err) => {

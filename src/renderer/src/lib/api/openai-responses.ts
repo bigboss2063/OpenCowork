@@ -17,7 +17,7 @@ import {
   DESKTOP_TYPE_TOOL_NAME,
   DESKTOP_WAIT_TOOL_NAME
 } from '../app-plugin/types'
-import { ipcStreamRequest, maskHeaders } from '../ipc/api-stream'
+import { ApiStreamError, ipcStreamRequest, maskHeaders } from '../ipc/api-stream'
 import { loadPrompt } from '../prompts/prompt-loader'
 import { registerProvider } from './provider'
 
@@ -54,13 +54,31 @@ function applyBodyOverrides(body: Record<string, unknown>, config: ProviderConfi
   }
 }
 
+class RecoverableResponsesWebSocketError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RecoverableResponsesWebSocketError'
+  }
+}
+
+function shouldUseResponsesWebSocket(config: ProviderConfig): boolean {
+  return config.type === 'openai-responses' && config.preferResponsesWebSocket === true
+}
+
+function isRecoverableResponsesWebSocketProtocolError(data: {
+  error?: { code?: string }
+}): boolean {
+  const code = data.error?.code
+  return code === 'previous_response_not_found' || code === 'websocket_connection_limit_reached'
+}
+
 interface ComputerActionInputDescriptor {
   toolName: string
   input: Record<string, unknown>
   extraContent: ToolCallExtraContent
 }
 
-interface PendingComputerUseTurn {
+interface PendingResponsesContinuationTurn {
   previousResponseId: string
   input: unknown[]
 }
@@ -87,21 +105,22 @@ class OpenAIResponsesProvider implements APIProvider {
     const requestStartedAt = Date.now()
     let firstTokenAt: number | null = null
     let outputTokens = 0
+    let websocketStartedStreaming = false
     const baseUrl = (config.baseUrl || 'https://api.openai.com/v1').trim().replace(/\/+$/, '')
-    const pendingComputerTurn = config.computerUseEnabled
-      ? this.extractPendingComputerUseTurn(messages)
+    const useResponsesWebSocket = shouldUseResponsesWebSocket(config)
+    const fullInput = this.formatMessages(messages, config.systemPrompt, !!config.thinkingEnabled)
+    const pendingContinuationTurn = useResponsesWebSocket
+      ? this.extractPendingResponsesContinuationTurn(
+          messages,
+          !!config.thinkingEnabled,
+          !!config.computerUseEnabled
+        )
       : null
 
     const body: Record<string, unknown> = {
       model: config.model,
-      input: pendingComputerTurn
-        ? pendingComputerTurn.input
-        : this.formatMessages(messages, config.systemPrompt, !!config.thinkingEnabled),
+      input: fullInput,
       stream: true
-    }
-
-    if (pendingComputerTurn) {
-      body.previous_response_id = pendingComputerTurn.previousResponseId
     }
 
     if (config.sessionId) {
@@ -181,15 +200,29 @@ class OpenAIResponsesProvider implements APIProvider {
     if (config.serviceTier) headers.service_tier = config.serviceTier
     applyHeaderOverrides(headers, config)
 
-    const bodyStr = JSON.stringify(body)
+    const websocketBody = pendingContinuationTurn
+      ? {
+          ...body,
+          input: pendingContinuationTurn.input,
+          previous_response_id: pendingContinuationTurn.previousResponseId
+        }
+      : body
+    const httpBodyStr = JSON.stringify(body)
+    const websocketBodyStr = JSON.stringify(websocketBody)
+    const transportSessionKey =
+      config.sessionId ?? `${config.providerId ?? 'provider'}::${config.model}`
+
+    console.log(
+      `[OpenAI Responses] transport=${useResponsesWebSocket ? 'websocket' : 'http'} session=${transportSessionKey} continuation=${pendingContinuationTurn ? 'yes' : 'no'} previous_response_id=${pendingContinuationTurn?.previousResponseId ?? 'none'} model=${config.model}`
+    )
 
     yield {
       type: 'request_debug',
       debugInfo: {
         url,
-        method: 'POST',
+        method: useResponsesWebSocket ? 'WS' : 'POST',
         headers: maskHeaders(headers),
-        body: bodyStr,
+        body: useResponsesWebSocket ? websocketBodyStr : httpBodyStr,
         timestamp: Date.now()
       }
     }
@@ -230,202 +263,245 @@ class OpenAIResponsesProvider implements APIProvider {
       }
     }
 
-    const transport =
-      config.preferResponsesWebSocket || config.providerBuiltinId === 'codex-oauth'
-        ? 'websocket'
-        : undefined
-    for await (const sse of ipcStreamRequest({
-      url,
-      method: 'POST',
-      headers,
-      body: bodyStr,
-      signal,
-      useSystemProxy: config.useSystemProxy,
-      providerId: config.providerId,
-      providerBuiltinId: config.providerBuiltinId,
-      transport
-    })) {
-      if (!sse.data || sse.data === '[DONE]') continue
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let data: any
-      try {
-        data = JSON.parse(sse.data)
-      } catch {
-        continue
-      }
-
-      switch (sse.event) {
-        case 'response.output_text.delta':
-          if (firstTokenAt === null) firstTokenAt = Date.now()
-          yield { type: 'text_delta', text: data.delta }
-          break
-
-        case 'response.reasoning_summary_text.delta': {
-          if (firstTokenAt === null) firstTokenAt = Date.now()
-          const thinkingEvent = tryBuildThinkingDeltaEvent(data.delta)
-          if (thinkingEvent) {
-            yield thinkingEvent
-          }
-          break
+    const buildComputerUseToolEvents = this.buildComputerUseToolEvents.bind(this)
+    const streamTransport = async function* (
+      requestBody: string,
+      transport?: 'websocket'
+    ): AsyncIterable<StreamEvent> {
+      for await (const sse of ipcStreamRequest({
+        url,
+        method: 'POST',
+        headers,
+        body: requestBody,
+        signal,
+        useSystemProxy: config.useSystemProxy,
+        providerId: config.providerId,
+        providerBuiltinId: config.providerBuiltinId,
+        transport,
+        transportSessionKey
+      })) {
+        if (!sse.data || sse.data === '[DONE]') continue
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let data: any
+        try {
+          data = JSON.parse(sse.data)
+        } catch {
+          continue
         }
 
-        case 'response.reasoning_summary_text.done': {
-          if (firstTokenAt === null) firstTokenAt = Date.now()
-          if (!emittedThinkingDelta) {
-            const thinkingEvent = tryBuildThinkingDeltaEvent(
-              data.text ?? data.delta ?? extractReasoningSummaryText(data.summary)
-            )
+        switch (sse.event) {
+          case 'response.output_text.delta':
+            websocketStartedStreaming = websocketStartedStreaming || transport === 'websocket'
+            if (firstTokenAt === null) firstTokenAt = Date.now()
+            yield { type: 'text_delta', text: data.delta }
+            break
+
+          case 'response.reasoning_summary_text.delta': {
+            websocketStartedStreaming = websocketStartedStreaming || transport === 'websocket'
+            if (firstTokenAt === null) firstTokenAt = Date.now()
+            const thinkingEvent = tryBuildThinkingDeltaEvent(data.delta)
             if (thinkingEvent) {
               yield thinkingEvent
             }
-          }
-          break
-        }
-
-        case 'response.output_item.added':
-          if (data.item?.type === 'function_call') {
-            argBuffers.set(data.item.id, '')
-            yield {
-              type: 'tool_call_start',
-              toolCallId: data.item.call_id,
-              toolName: data.item.name
-            }
-          } else if (data.item?.type === 'computer_call') {
-            for (const event of this.buildComputerUseToolEvents(
-              data.item,
-              emittedComputerCallIds
-            )) {
-              yield event
-            }
-          } else if (data.item?.type === 'reasoning') {
-            const thinkingEncryptedEvent = tryBuildThinkingEncryptedEvent(
-              data.item.encrypted_content ?? data.item.reasoning?.encrypted_content
-            )
-            if (thinkingEncryptedEvent) {
-              yield thinkingEncryptedEvent
-            }
-          }
-          break
-
-        case 'response.output_item.done': {
-          if (data.item?.type === 'computer_call') {
-            for (const event of this.buildComputerUseToolEvents(
-              data.item,
-              emittedComputerCallIds
-            )) {
-              yield event
-            }
+            break
           }
 
-          if (firstTokenAt === null) firstTokenAt = Date.now()
-          if (!emittedThinkingDelta) {
-            const thinkingEvent = tryBuildThinkingDeltaEvent(
-              extractReasoningSummaryText(data.item?.summary ?? data.item?.reasoning?.summary)
-            )
-            if (thinkingEvent) {
-              yield thinkingEvent
-            }
-          }
-
-          const thinkingEncryptedEvent = tryBuildThinkingEncryptedEvent(
-            data.item?.encrypted_content ?? data.item?.reasoning?.encrypted_content
-          )
-          if (thinkingEncryptedEvent) {
-            yield thinkingEncryptedEvent
-          }
-          break
-        }
-
-        case 'response.function_call_arguments.delta': {
-          yield { type: 'tool_call_delta', toolCallId: data.call_id, argumentsDelta: data.delta }
-          const key = data.item_id
-          argBuffers.set(key, (argBuffers.get(key) ?? '') + data.delta)
-          break
-        }
-
-        case 'response.function_call_arguments.done':
-          try {
-            yield {
-              type: 'tool_call_end',
-              toolCallId: data.call_id,
-              toolName: data.name,
-              toolCallInput: JSON.parse(data.arguments)
-            }
-          } catch {
-            yield {
-              type: 'tool_call_end',
-              toolCallId: data.call_id,
-              toolName: data.name,
-              toolCallInput: {}
-            }
-          }
-          break
-
-        case 'response.completed': {
-          const requestCompletedAt = Date.now()
-          const responseOutput = data.response?.output
-          if (Array.isArray(responseOutput)) {
-            for (const item of responseOutput) {
-              if (item?.type === 'computer_call') {
-                for (const event of this.buildComputerUseToolEvents(item, emittedComputerCallIds)) {
-                  yield event
-                }
+          case 'response.reasoning_summary_text.done': {
+            websocketStartedStreaming = websocketStartedStreaming || transport === 'websocket'
+            if (firstTokenAt === null) firstTokenAt = Date.now()
+            if (!emittedThinkingDelta) {
+              const thinkingEvent = tryBuildThinkingDeltaEvent(
+                data.text ?? data.delta ?? extractReasoningSummaryText(data.summary)
+              )
+              if (thinkingEvent) {
+                yield thinkingEvent
               }
+            }
+            break
+          }
 
-              if (!emittedThinkingDelta) {
-                const thinkingEvent = tryBuildThinkingDeltaEvent(
-                  extractReasoningSummaryText(item?.summary ?? item?.reasoning?.summary)
-                )
-                if (thinkingEvent) {
-                  if (firstTokenAt === null) firstTokenAt = Date.now()
-                  yield thinkingEvent
-                }
+          case 'response.output_item.added':
+            websocketStartedStreaming = websocketStartedStreaming || transport === 'websocket'
+            if (data.item?.type === 'function_call') {
+              argBuffers.set(data.item.id, '')
+              yield {
+                type: 'tool_call_start',
+                toolCallId: data.item.call_id,
+                toolName: data.item.name
               }
-
+            } else if (data.item?.type === 'computer_call') {
+              for (const event of buildComputerUseToolEvents(data.item, emittedComputerCallIds)) {
+                yield event
+              }
+            } else if (data.item?.type === 'reasoning') {
               const thinkingEncryptedEvent = tryBuildThinkingEncryptedEvent(
-                item?.encrypted_content ?? item?.reasoning?.encrypted_content
+                data.item.encrypted_content ?? data.item.reasoning?.encrypted_content
               )
               if (thinkingEncryptedEvent) {
                 yield thinkingEncryptedEvent
               }
             }
-          }
-          if (data.response?.usage?.output_tokens !== undefined) {
-            outputTokens = data.response.usage.output_tokens ?? outputTokens
-          }
-          const cachedTokens = data.response?.usage?.input_tokens_details?.cached_tokens ?? 0
-          const rawInputTokens = data.response?.usage?.input_tokens ?? 0
-          yield {
-            type: 'message_end',
-            stopReason: data.response.status,
-            providerResponseId: data.response?.id,
-            usage: data.response.usage
-              ? {
-                  inputTokens: rawInputTokens,
-                  outputTokens: data.response.usage.output_tokens ?? 0,
-                  contextTokens: rawInputTokens,
-                  ...(cachedTokens > 0 ? { cacheReadTokens: cachedTokens } : {}),
-                  ...(data.response.usage.output_tokens_details?.reasoning_tokens
-                    ? {
-                        reasoningTokens: data.response.usage.output_tokens_details.reasoning_tokens
-                      }
-                    : {})
-                }
-              : undefined,
-            timing: {
-              totalMs: requestCompletedAt - requestStartedAt,
-              ttftMs: firstTokenAt ? firstTokenAt - requestStartedAt : undefined,
-              tps: computeTps(outputTokens, firstTokenAt, requestCompletedAt)
-            }
-          }
-          break
-        }
+            break
 
-        case 'response.failed':
-        case 'error':
-          yield { type: 'error', error: { type: 'api_error', message: JSON.stringify(data) } }
-          break
+          case 'response.output_item.done': {
+            websocketStartedStreaming = websocketStartedStreaming || transport === 'websocket'
+            if (data.item?.type === 'computer_call') {
+              for (const event of buildComputerUseToolEvents(data.item, emittedComputerCallIds)) {
+                yield event
+              }
+            }
+
+            if (firstTokenAt === null) firstTokenAt = Date.now()
+            if (!emittedThinkingDelta) {
+              const thinkingEvent = tryBuildThinkingDeltaEvent(
+                extractReasoningSummaryText(data.item?.summary ?? data.item?.reasoning?.summary)
+              )
+              if (thinkingEvent) {
+                yield thinkingEvent
+              }
+            }
+
+            const thinkingEncryptedEvent = tryBuildThinkingEncryptedEvent(
+              data.item?.encrypted_content ?? data.item?.reasoning?.encrypted_content
+            )
+            if (thinkingEncryptedEvent) {
+              yield thinkingEncryptedEvent
+            }
+            break
+          }
+
+          case 'response.function_call_arguments.delta': {
+            websocketStartedStreaming = websocketStartedStreaming || transport === 'websocket'
+            yield { type: 'tool_call_delta', toolCallId: data.call_id, argumentsDelta: data.delta }
+            const key = data.item_id
+            argBuffers.set(key, (argBuffers.get(key) ?? '') + data.delta)
+            break
+          }
+
+          case 'response.function_call_arguments.done':
+            websocketStartedStreaming = websocketStartedStreaming || transport === 'websocket'
+            try {
+              yield {
+                type: 'tool_call_end',
+                toolCallId: data.call_id,
+                toolName: data.name,
+                toolCallInput: JSON.parse(data.arguments)
+              }
+            } catch {
+              yield {
+                type: 'tool_call_end',
+                toolCallId: data.call_id,
+                toolName: data.name,
+                toolCallInput: {}
+              }
+            }
+            break
+
+          case 'response.completed': {
+            const requestCompletedAt = Date.now()
+            const responseOutput = data.response?.output
+            if (Array.isArray(responseOutput)) {
+              for (const item of responseOutput) {
+                if (item?.type === 'computer_call') {
+                  for (const event of buildComputerUseToolEvents(item, emittedComputerCallIds)) {
+                    yield event
+                  }
+                }
+
+                if (!emittedThinkingDelta) {
+                  const thinkingEvent = tryBuildThinkingDeltaEvent(
+                    extractReasoningSummaryText(item?.summary ?? item?.reasoning?.summary)
+                  )
+                  if (thinkingEvent) {
+                    if (firstTokenAt === null) firstTokenAt = Date.now()
+                    yield thinkingEvent
+                  }
+                }
+
+                const thinkingEncryptedEvent = tryBuildThinkingEncryptedEvent(
+                  item?.encrypted_content ?? item?.reasoning?.encrypted_content
+                )
+                if (thinkingEncryptedEvent) {
+                  yield thinkingEncryptedEvent
+                }
+              }
+            }
+            if (data.response?.usage?.output_tokens !== undefined) {
+              outputTokens = data.response.usage.output_tokens ?? outputTokens
+            }
+            const cachedTokens = data.response?.usage?.input_tokens_details?.cached_tokens ?? 0
+            const rawInputTokens = data.response?.usage?.input_tokens ?? 0
+            yield {
+              type: 'message_end',
+              stopReason: data.response.status,
+              providerResponseId: data.response?.id,
+              usage: data.response.usage
+                ? {
+                    inputTokens: rawInputTokens,
+                    outputTokens: data.response.usage.output_tokens ?? 0,
+                    contextTokens: rawInputTokens,
+                    ...(cachedTokens > 0 ? { cacheReadTokens: cachedTokens } : {}),
+                    ...(data.response.usage.output_tokens_details?.reasoning_tokens
+                      ? {
+                          reasoningTokens:
+                            data.response.usage.output_tokens_details.reasoning_tokens
+                        }
+                      : {})
+                  }
+                : undefined,
+              timing: {
+                totalMs: requestCompletedAt - requestStartedAt,
+                ttftMs: firstTokenAt ? firstTokenAt - requestStartedAt : undefined,
+                tps: computeTps(outputTokens, firstTokenAt, requestCompletedAt)
+              }
+            }
+            break
+          }
+
+          case 'response.failed':
+            yield { type: 'error', error: { type: 'api_error', message: JSON.stringify(data) } }
+            break
+
+          case 'error':
+            if (
+              transport === 'websocket' &&
+              !websocketStartedStreaming &&
+              isRecoverableResponsesWebSocketProtocolError(data)
+            ) {
+              throw new RecoverableResponsesWebSocketError(JSON.stringify(data))
+            }
+            yield { type: 'error', error: { type: 'api_error', message: JSON.stringify(data) } }
+            break
+        }
       }
+    }
+
+    if (useResponsesWebSocket) {
+      try {
+        for await (const event of streamTransport(websocketBodyStr, 'websocket')) {
+          yield event
+        }
+        return
+      } catch (error) {
+        if (
+          websocketStartedStreaming ||
+          (!(error instanceof RecoverableResponsesWebSocketError) &&
+            !(error instanceof ApiStreamError))
+        ) {
+          throw error
+        }
+        console.warn(
+          `[OpenAI Responses] WebSocket unavailable, fallback to HTTP session=${transportSessionKey}`,
+          error
+        )
+      }
+    }
+
+    if (useResponsesWebSocket) {
+      console.log(`[OpenAI Responses] Using HTTP fallback session=${transportSessionKey}`)
+    }
+    for await (const event of streamTransport(httpBodyStr)) {
+      yield event
     }
   }
 
@@ -846,7 +922,31 @@ class OpenAIResponsesProvider implements APIProvider {
     return `${callId}__${actionIndex}__${safeToolName}__${suffix}`
   }
 
-  private extractPendingComputerUseTurn(messages: UnifiedMessage[]): PendingComputerUseTurn | null {
+  private extractPendingResponsesContinuationTurn(
+    messages: UnifiedMessage[],
+    includeEncryptedReasoning: boolean,
+    computerUseEnabled: boolean
+  ): PendingResponsesContinuationTurn | null {
+    if (computerUseEnabled) {
+      const pendingComputerUseTurn = this.extractPendingComputerUseTurn(messages)
+      if (pendingComputerUseTurn) return pendingComputerUseTurn
+    }
+
+    const lastMessage = messages.at(-1)
+    const previousMessage = messages.at(-2)
+    if (!lastMessage || !previousMessage) return null
+    if (lastMessage.role !== 'user' || previousMessage.role !== 'assistant') return null
+    if (!previousMessage.providerResponseId) return null
+
+    return {
+      previousResponseId: previousMessage.providerResponseId,
+      input: this.formatMessages([lastMessage], undefined, includeEncryptedReasoning)
+    }
+  }
+
+  private extractPendingComputerUseTurn(
+    messages: UnifiedMessage[]
+  ): PendingResponsesContinuationTurn | null {
     const lastMessage = messages.at(-1)
     const previousMessage = messages.at(-2)
     if (!lastMessage || !previousMessage) return null

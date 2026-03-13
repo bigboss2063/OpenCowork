@@ -62,7 +62,11 @@ function getApiStreamDispatcherState(): ApiStreamDispatcherState {
   return scope[API_STREAM_DISPATCHER_KEY]
 }
 
-function completeRequest(state: ApiStreamDispatcherState, requestId: string, item: QueueItem): void {
+function completeRequest(
+  state: ApiStreamDispatcherState,
+  requestId: string,
+  item: QueueItem
+): void {
   const request = state.requests.get(requestId)
   if (!request) return
   request.push(item)
@@ -122,6 +126,7 @@ export async function* ipcStreamRequest(params: {
   providerId?: string
   providerBuiltinId?: string
   transport?: 'http' | 'websocket'
+  transportSessionKey?: string
 }): AsyncIterable<SSEEvent> {
   const requestId = nanoid()
   const {
@@ -133,7 +138,8 @@ export async function* ipcStreamRequest(params: {
     useSystemProxy,
     providerId,
     providerBuiltinId,
-    transport
+    transport,
+    transportSessionKey
   } = params
 
   const queue: QueueItem[] = []
@@ -176,7 +182,8 @@ export async function* ipcStreamRequest(params: {
     useSystemProxy,
     providerId,
     providerBuiltinId,
-    transport
+    transport,
+    transportSessionKey
   })
 
   let buffer = ''
